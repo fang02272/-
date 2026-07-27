@@ -1,0 +1,24 @@
+# 焊接工艺专家系统 — 配置文件
+# LLM 大模型配置（OpenAI 兼容接口）
+
+llm:
+  # API 端点 — 支持任意 OpenAI 兼容接口
+  # DeepSeek: https://api.deepseek.com/v1
+  # Kimi: https://api.moonshot.cn/v1
+  # 通义千问: https://dashscope.aliyuncs.com/compatible-mode/v1
+  # 本地 Ollama: http://localhost:11434/v1
+  api_base: "https://api.deepseek.com/v1"
+  api_key: "sk-91f87f75653c4fb1abf6596df9cc03b6"
+  model: "deepseek-chat"
+  max_tokens: 4096
+  temperature: 0.3
+  timeout_seconds: 120
+
+# 本地知识库配置
+knowledge:
+  # 上传PDF存储目录
+  upload_dir: "uploads"
+  # 全文检索的段落大小（字符数）
+  chunk_size: 800
+  # 检索时返回的最大段落数
+  top_k: 10
