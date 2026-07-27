@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>焊接工艺专家系统 — AI驱动的智能焊接知识平台</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+/* ============================================================
+   Design Tokens
+   ============================================================ */
+:root {
+  --primary:#4F46E5;--primary-hover:#4338CA;--primary-light:#EEF2FF;--primary-soft:#E0E7FF;
+  --surface:#FFFFFF;--surface-secondary:#F8FAFC;--surface-tertiary:#F1F5F9;
+  --text-primary:#0F172A;--text-secondary:#475569;--text-tertiary:#94A3B8;
+  --border:#E2E8F0;--border-light:#F1F5F9;
+  --success:#10B981;--success-bg:#ECFDF5;--warning:#F59E0B;--warning-bg:#FFFBEB;
+  --info:#3B82F6;--info-bg:#EFF6FF;--purple:#8B5CF6;--purple-bg:#F5F3FF;--rose:#F43F5E;--rose-bg:#FFF1F2;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.05);
+  --shadow-md:0 4px 6px -1px rgba(0,0,0,.07),0 2px 4px -2px rgba(0,0,0,.05);
+  --shadow-lg:0 10px 25px -3px rgba(0,0,0,.08),0 4px 6px -4px rgba(0,0,0,.04);
+  --radius-sm:8px;--radius-md:12px;--radius-lg:16px;--radius-xl:24px;
+  --content-width:860px;
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;-webkit-font-smoothing:antialiased}
+body{font-family:var(--font-sans);background:var(--surface-secondary);color:var(--text-primary);line-height:1.6;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{cursor:pointer;border:none;background:none;font-family:inherit;font-size:inherit}
+input,textarea{font-family:inherit;font-size:inherit}
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:10px}
+
+/* ============================================================
+   Top Bar
+   ============================================================ */
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 24px;background:var(--surface);border-bottom:1px solid var(--border-light);flex-shrink:0;z-index:10;gap:12px;min-height:54px}
+.topbar-left{display:flex;align-items:center;gap:10px}
+.topbar-logo{width:34px;height:34px;background:linear-gradient(135deg,var(--primary),#7C3AED);border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;color:#fff;font-size:17px}
+.topbar-title{font-size:14px;font-weight:700;color:var(--text-primary);white-space:nowrap}
+.topbar-badge{font-size:10px;padding:2px 8px;border-radius:20px;font-weight:500;white-space:nowrap}
+.topbar-badge.online{background:var(--success-bg);color:var(--success)}
+.topbar-badge.llm{background:var(--purple-bg);color:var(--purple)}
+.topbar-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.topbar-btn{padding:7px 14px;font-size:12.5px;color:var(--text-secondary);border-radius:var(--radius-sm);transition:all .15s;display:flex;align-items:center;gap:5px;border:1px solid var(--border);white-space:nowrap}
+.topbar-btn:hover{background:var(--surface-secondary);border-color:var(--text-tertiary)}
+.topbar-btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.topbar-btn.primary:hover{background:var(--primary-hover)}
+.topbar-btn .dot{width:6px;height:6px;border-radius:50%}
+.topbar-btn .dot.green{background:var(--success)}
+.topbar-btn .dot.gray{background:var(--text-tertiary)}
+
+/* ============================================================
+   Main Container
+   ============================================================ */
+.main-container{flex:1;display:flex;flex-direction:column;overflow:hidden;max-width:var(--content-width);width:100%;margin:0 auto}
+.messages-area{flex:1;overflow-y:auto;padding:24px 20px 8px;display:flex;flex-direction:column;gap:20px;scroll-behavior:smooth}
+
+/* ============================================================
+   Welcome
+   ============================================================ */
+.welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;text-align:center}
+.welcome-icon{width:72px;height:72px;background:linear-gradient(135deg,#4F46E5,#7C3AED);border-radius:20px;display:flex;align-items:center;justify-content:center;font-size:32px;margin-bottom:20px;box-shadow:0 12px 32px rgba(79,70,229,.3)}
+.welcome h2{font-size:24px;font-weight:700;margin-bottom:6px}
+.welcome .sub{font-size:14px;color:var(--text-secondary);margin-bottom:32px;line-height:1.6}
+.welcome-chips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;max-width:700px}
+.welcome-chip{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);font-size:13.5px;color:var(--text-primary);cursor:pointer;transition:all .2s;white-space:nowrap}
+.welcome-chip:hover{background:var(--primary-light);border-color:var(--primary-soft);color:var(--primary);transform:translateY(-2px);box-shadow:var(--shadow-md)}
+
+/* ============================================================
+   Messages
+   ============================================================ */
+.msg{display:flex;gap:12px;animation:msgIn .35s ease}
+@keyframes msgIn{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+.msg.user{flex-direction:row-reverse}
+.msg-avatar{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;margin-top:2px}
+.msg.user .msg-avatar{background:var(--primary-light)}
+.msg.bot .msg-avatar{background:var(--surface);border:1px solid var(--border)}
+.msg-content{max-width:88%}
+.msg.user .msg-content{display:flex;flex-direction:column;align-items:flex-end}
+.msg-bubble{padding:12px 18px;border-radius:var(--radius-lg);font-size:14.5px;line-height:1.65;white-space:pre-wrap;word-break:break-word}
+.msg.user .msg-bubble{background:linear-gradient(135deg,#4F46E5,#6366F1);color:#fff;border-bottom-right-radius:4px}
+.msg-time{font-size:11px;color:var(--text-tertiary);margin-top:4px;padding:0 4px}
+
+/* ============================================================
+   AI Expert Answer Card
+   ============================================================ */
+.expert-card{background:var(--surface);border-radius:var(--radius-md);border:1px solid var(--border);box-shadow:var(--shadow-sm);overflow:hidden;animation:cardIn .45s ease}
+@keyframes cardIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+.card-header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:linear-gradient(135deg,var(--primary-light),var(--primary-soft));border-bottom:1px solid var(--border-light)}
+.card-header-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.card-header-left .exp{font-size:14px;font-weight:700;color:var(--primary)}
+.card-header-left .kw{font-size:10.5px;padding:2px 8px;background:var(--surface);color:var(--text-secondary);border-radius:20px;border:1px solid var(--border)}
+.card-model{font-size:10px;color:var(--text-tertiary);background:var(--surface);padding:3px 8px;border-radius:10px}
+.card-body{padding:24px 28px}
+.card-body h1{font-size:20px;font-weight:700;margin:0 0 16px;color:var(--text-primary)}
+.card-body h2{font-size:17px;font-weight:700;margin:24px 0 12px;color:var(--text-primary);padding-bottom:8px;border-bottom:2px solid var(--primary-soft)}
+.card-body h3{font-size:15px;font-weight:600;margin:18px 0 8px;color:var(--text-primary);padding-left:12px;border-left:3px solid var(--info)}
+.card-body h4{font-size:14px;font-weight:600;margin:14px 0 6px;color:var(--text-secondary)}
+.card-body p{margin-bottom:10px;line-height:1.8;color:var(--text-secondary)}
+.card-body ul,.card-body ol{padding-left:18px;margin-bottom:12px}
+.card-body li{line-height:1.75;margin-bottom:4px;color:var(--text-secondary)}
+.card-body strong,b{color:var(--text-primary)}
+.card-body code{background:var(--surface-tertiary);padding:2px 6px;border-radius:4px;font-size:.88em;color:#e11d48}
+.card-body blockquote{margin:12px 0;padding:12px 16px;background:var(--info-bg);border-left:4px solid var(--info);border-radius:0 var(--radius-sm) var(--radius-sm) 0;color:var(--text-secondary);font-size:14px}
+.card-body pre{background:#1E293B;color:#E2E8F0;padding:16px;border-radius:var(--radius-sm);overflow-x:auto;margin:12px 0;font-size:13px;line-height:1.5}
+.card-body pre code{background:none;color:inherit;padding:0;font-size:inherit}
+
+/* Markdown Tables */
+.card-body .md-table-wrap{overflow-x:auto;margin:14px 0;border-radius:var(--radius-sm);border:1px solid var(--border)}
+.card-body table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.6}
+.card-body thead th{background:var(--surface-tertiary);color:var(--text-primary);font-weight:600;padding:10px 14px;text-align:left;border-bottom:2px solid var(--border);white-space:nowrap;font-size:12.5px}
+.card-body tbody td{padding:9px 14px;border-bottom:1px solid var(--border-light);color:var(--text-secondary);vertical-align:top}
+.card-body tbody tr:nth-child(even){background:var(--surface-secondary)}
+.card-body tbody tr:hover{background:var(--primary-light)}
+.card-body table td:first-child,.card-body table th:first-child{font-weight:600;color:var(--text-primary)}
+
+/* Mermaid Diagram */
+.mermaid-wrap{background:var(--surface-secondary);border:1px solid var(--border);border-radius:var(--radius-md);padding:20px;margin:16px 0;text-align:center;overflow-x:auto}
+.mermaid-wrap .mermaid-label{font-size:11px;color:var(--text-tertiary);margin-bottom:10px}
+
+/* Reference Footer */
+.ref-section{margin-top:20px;padding:16px 20px;background:linear-gradient(135deg,#F0FDF4,#ECFDF5);border-radius:var(--radius-md);border:1px solid #BBF7D0}
+.ref-section .ref-title{font-size:13px;font-weight:700;color:var(--success);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.ref-item{padding:6px 0;font-size:13px;color:var(--text-primary);display:flex;align-items:flex-start;gap:8px;line-height:1.6}
+.ref-item .ref-dot{width:6px;height:6px;border-radius:50%;background:var(--success);flex-shrink:0;margin-top:7px}
+
+/* ============================================================
+   Typing
+   ============================================================ */
+.typing{display:flex;align-items:center;gap:8px;padding:14px 18px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);border-bottom-left-radius:4px;width:fit-content;box-shadow:var(--shadow-sm);animation:msgIn .3s ease}
+.typing-dots{display:flex;gap:4px}
+.typing-dots span{width:7px;height:7px;border-radius:50%;background:var(--text-tertiary);animation:tdot 1.4s infinite both}
+.typing-dots span:nth-child(1){animation-delay:0s}
+.typing-dots span:nth-child(2){animation-delay:.2s}
+.typing-dots span:nth-child(3){animation-delay:.4s}
+@keyframes tdot{0%,80%,100%{transform:scale(1);opacity:.4}40%{transform:scale(1.3);opacity:1}}
+.typing-txt{font-size:12px;color:var(--text-tertiary)}
+
+/* ============================================================
+   Input
+   ============================================================ */
+.input-bar{padding:12px 20px 18px;flex-shrink:0;background:var(--surface-secondary);border-top:1px solid var(--border-light);position:sticky;bottom:0}
+.input-wrap{display:flex;align-items:flex-end;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);padding:6px 8px 6px 20px;transition:all .2s;box-shadow:var(--shadow-sm)}
+.input-wrap:focus-within{border-color:var(--primary);box-shadow:0 0 0 3px rgba(79,70,229,.1)}
+.input-wrap textarea{flex:1;border:none;background:transparent;resize:none;outline:none;padding:9px 0;font-size:14px;line-height:1.5;color:var(--text-primary);max-height:130px;min-height:24px}
+.input-wrap textarea::placeholder{color:var(--text-tertiary)}
+.btn-send{width:40px;height:40px;border-radius:50%;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;transition:all .2s;flex-shrink:0}
+.btn-send:hover{background:var(--primary-hover);transform:scale(1.05)}
+.btn-send:active{transform:scale(.95)}
+.btn-send:disabled{background:var(--text-tertiary);cursor:not-allowed;transform:none}
+.btn-send .spin{width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.input-hint{text-align:center;font-size:11px;color:var(--text-tertiary);margin-top:6px}
+
+/* ============================================================
+   PDF Upload Modal
+   ============================================================ */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--surface);border-radius:var(--radius-lg);width:480px;max-width:92vw;box-shadow:var(--shadow-lg);overflow:hidden;animation:modalIn .3s ease}
+@keyframes modalIn{from{opacity:0;transform:scale(.95) translateY(-10px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.modal-header{padding:18px 24px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;justify-content:space-between}
+.modal-header h3{font-size:16px;font-weight:700}
+.modal-close{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--text-tertiary)}
+.modal-close:hover{background:var(--surface-secondary);color:var(--text-primary)}
+.modal-body{padding:24px;max-height:60vh;overflow-y:auto}
+.upload-zone{border:2px dashed var(--border);border-radius:var(--radius-md);padding:40px 20px;text-align:center;cursor:pointer;transition:all .2s}
+.upload-zone:hover,.upload-zone.drag{border-color:var(--primary);background:var(--primary-light)}
+.upload-zone .uz-icon{font-size:40px;margin-bottom:10px}
+.upload-zone .uz-text{font-size:14px;color:var(--text-secondary)}
+.upload-zone .uz-hint{font-size:12px;color:var(--text-tertiary);margin-top:6px}
+.file-list-item{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;margin-bottom:4px;background:var(--surface-secondary);border-radius:var(--radius-sm);font-size:13px}
+.file-list-item .fli-name{font-weight:500}
+.file-list-item .fli-info{font-size:11px;color:var(--text-tertiary);margin-left:8px}
+.file-list-item .fli-del{padding:4px 10px;font-size:11px;color:var(--rose);border:1px solid #FECACA;border-radius:4px;cursor:pointer}
+.file-list-item .fli-del:hover{background:var(--rose-bg)}
+.upload-status{padding:12px 16px;border-radius:var(--radius-sm);margin-top:12px;text-align:center;font-size:13px}
+.upload-status.ok{background:var(--success-bg);color:var(--success);border:1px solid #A7F3D0}
+.upload-status.err{background:#FEF2F2;color:#EF4444;border:1px solid #FECACA}
+
+/* ============================================================
+   Error
+   ============================================================ */
+.err-card{padding:14px 18px;background:#FEF2F2;border:1px solid #FECACA;border-radius:var(--radius-md);color:#991B1B;font-size:13px;line-height:1.6}
+
+/* ============================================================
+   Toast
+   ============================================================ */
+.toast{position:fixed;top:20px;right:20px;padding:12px 18px;border-radius:var(--radius-sm);font-size:13px;font-weight:500;color:#fff;z-index:300;animation:toastIn .3s ease,toastOut .3s ease 2.5s forwards;box-shadow:var(--shadow-lg)}
+.toast.ok{background:var(--success)}
+.toast.err{background:#EF4444}
+@keyframes toastIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes toastOut{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-10px)}}
+
+/* ============================================================
+   Book Panel (floating)
+   ============================================================ */
+.book-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:100}
+.book-overlay.open{display:block}
+.book-panel{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:90vw;background:var(--surface);z-index:101;transform:translateX(100%);transition:transform .3s ease;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.12)}
+.book-panel.open{transform:translateX(0)}
+.book-panel-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border-light)}
+.book-panel-header h3{font-size:15px;font-weight:700}
+.book-panel-close{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--text-tertiary)}
+.book-panel-close:hover{background:var(--surface-secondary);color:var(--text-primary)}
+.book-panel-body{flex:1;overflow-y:auto;padding:16px 20px}
+.book-part{margin-bottom:16px}
+.book-part-title{font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.book-chapter{display:block;width:100%;text-align:left;padding:8px 12px;margin-bottom:3px;font-size:12.5px;color:var(--text-secondary);border-radius:6px;cursor:pointer;transition:all .12s}
+.book-chapter:hover{background:var(--primary-light);color:var(--primary)}
+.book-panel-footer{padding:12px 20px;border-top:1px solid var(--border-light);font-size:11px;color:var(--text-tertiary)}
+
+/* ============================================================
+   Responsive
+   ============================================================ */
+@media(max-width:880px){
+  .main-container{max-width:100%}
+  .messages-area{padding:16px 12px 6px;gap:14px}
+  .input-bar{padding:10px 12px 14px}
+  .msg-content{max-width:94%}
+  .card-body{padding:16px 18px}
+  .welcome{padding:40px 16px}
+  .welcome h2{font-size:20px}
+  .welcome-chips{gap:8px}
+  .welcome-chip{font-size:12px;padding:8px 14px}
+  .topbar{padding:8px 14px;gap:6px}
+  .topbar-title{font-size:13px}
+  .topbar-btn{padding:5px 10px;font-size:11px}
+}
+@media(max-width:640px){
+  .card-body table{font-size:11px}
+  .card-body thead th,.card-body tbody td{padding:6px 8px}
+  .modal{width:96vw}
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     Top Bar
+     ============================================================ -->
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo">🔬</div>
+    <span class="topbar-title">焊接工艺专家系统</span>
+    <span class="topbar-badge online">● 在线</span>
+    <span class="topbar-badge llm" id="llm-badge">🤖 LLM</span>
+  </div>
+  <div class="topbar-actions">
+    <button class="topbar-btn" onclick="openBookPanel()" title="书籍目录">📖 书籍目录</button>
+    <button class="topbar-btn primary" onclick="openUploadModal()" title="导入工艺PDF资料">📄 导入PDF</button>
+    <button class="topbar-btn" onclick="clearChat()">✨ 新对话</button>
+  </div>
+</header>
+
+<!-- ============================================================
+     Book Panel
+     ============================================================ -->
+<div class="book-overlay" id="book-overlay" onclick="closeBookPanel()"></div>
+<div class="book-panel" id="book-panel">
+  <div class="book-panel-header">
+    <h3>📖 《材料焊接原理》目录</h3>
+    <button class="book-panel-close" onclick="closeBookPanel()">✕</button>
+  </div>
+  <div class="book-panel-body" id="book-panel-body"></div>
+  <div class="book-panel-footer">王宗杰 主编 · 化学工业出版社 2024 · ISBN 978-7-122-44318-2</div>
+</div>
+
+<!-- ============================================================
+     PDF Upload Modal
+     ============================================================ -->
+<div class="modal-overlay" id="upload-modal">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>📄 导入焊接工艺PDF资料</h3>
+      <button class="modal-close" onclick="closeUploadModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+        <div class="uz-icon">📁</div>
+        <div class="uz-text">点击或拖拽PDF文件到此处上传</div>
+        <div class="uz-hint">支持焊接工艺手册、论文、标准等PDF文件 (最大50MB)</div>
+      </div>
+      <input type="file" id="file-input" accept=".pdf" style="display:none" onchange="handleFileSelect(this.files)">
+      <div id="upload-status"></div>
+      <div id="file-list" style="margin-top:16px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     Main Chat
+     ============================================================ -->
+<div class="main-container">
+  <div class="messages-area" id="messages">
+    <div class="welcome" id="welcome">
+      <div class="welcome-icon">🔬</div>
+      <h2>焊接工艺专家系统</h2>
+      <p class="sub">
+        AI大模型 + 《材料焊接原理》知识库 + PDF工艺资料检索<br>
+        以焊接工艺专家视角，为您提供深度分析、科普、选型和工艺指导
+      </p>
+      <div class="welcome-chips">
+        <button class="welcome-chip" data-q="弧焊机器人焊接12mm Q345钢板，怎么选工艺参数和焊接电源">🤖 12mm Q345弧焊参数</button>
+        <button class="welcome-chip" data-q="弧焊机器人系统组成、品牌选型和工艺方案">📋 弧焊机器人选型</button>
+        <button class="welcome-chip" data-q="异种材料焊接：铝合金和不锈钢能焊在一起吗，用什么方法">🔗 铝-不锈钢焊接</button>
+        <button class="welcome-chip" data-q="焊缝结晶裂纹的产生机理和工业防止措施">⚡ 焊缝结晶裂纹</button>
+        <button class="welcome-chip" data-q="X70管线钢焊接热影响区冷裂纹的防止措施和t8/5控制">🔥 X70冷裂纹防止</button>
+        <button class="welcome-chip" data-q="活性钎焊Ti元素反应连接Al2O3陶瓷与铜的工艺参数">🧪 活性钎焊陶瓷</button>
+      </div>
+    </div>
+  </div>
+  <div class="input-bar">
+    <div class="input-wrap">
+      <textarea id="qinput" placeholder="输入焊接场景问题，专家为您深度解析..." rows="1" maxlength="2000"></textarea>
+      <button class="btn-send" id="sendbtn" title="发送 (Enter)">➤</button>
+    </div>
+    <p class="input-hint">Enter 发送 · Shift+Enter 换行 · AI焊接专家 + 书籍知识库 + PDF资料检索</p>
+  </div>
+</div>
+
+<!-- Toasts -->
+<div id="toasts"></div>
+
+<script>
+/* ============================================================
+   Init
+   ============================================================ */
+let busy=false;
+const $=s=>document.querySelector(s);
+const esc=s=>{const d=document.createElement('div');d.textContent=s;return d.innerHTML};
+
+// Init Mermaid — suppress error messages
+mermaid.initialize({startOnLoad:false,theme:'default',securityLevel:'loose',fontFamily:'var(--font-sans)',suppressErrorRendering:true});
+// Override mermaid error handler to be silent
+if(typeof mermaid!=='undefined'&&mermaid.parse){
+  const origParse=mermaid.parse.bind(mermaid);
+  mermaid.parse=function(txt){try{return origParse(txt)}catch(e){return false}};
+}
+
+// Init Marked
+if(typeof marked!=='undefined'){
+  marked.setOptions({breaks:true,gfm:true});
+}
+
+/* ============================================================
+   LLM Status Check
+   ============================================================ */
+async function checkLLMStatus(){
+  try{
+    const r=await fetch('/api/config/status');
+    const d=await r.json();
+    const badge=$('#llm-badge');
+    if(d.llm_available){
+      badge.textContent='🤖 '+d.llm_model;
+      badge.style.background='var(--purple-bg)';badge.style.color='var(--purple)';
+    }else{
+      badge.textContent='📚 本地模式';
+      badge.style.background='var(--warning-bg)';badge.style.color='var(--warning)';
+    }
+  }catch(e){}
+}
+checkLLMStatus();
+
+/* ============================================================
+   Toast
+   ============================================================ */
+function toast(msg,type='ok'){
+  const c=$('#toasts');
+  const t=document.createElement('div');
+  t.className=`toast ${type}`;t.textContent=msg;
+  c.appendChild(t);
+  setTimeout(()=>t.remove(),3000);
+}
+
+/* ============================================================
+   Scroll
+   ============================================================ */
+function scrollDown(){requestAnimationFrame(()=>{const m=$('#messages');m.scrollTop=m.scrollHeight})}
+
+/* ============================================================
+   Book Panel
+   ============================================================ */
+async function openBookPanel(){
+  const panel=$('#book-panel'),overlay=$('#book-overlay'),body=$('#book-panel-body');
+  if(!body.dataset.loaded){
+    try{
+      const r=await fetch('/api/categories');const d=await r.json();
+      let h='';
+      for(const p of d.parts){
+        const icon=p.source==='uploaded'?'📄':'📘';
+        h+=`<div class="book-part"><div class="book-part-title">${icon} ${esc(p.name)}</div>`;
+        if(p.description)h+=`<div style="font-size:10px;color:var(--text-tertiary);margin-bottom:6px">${esc(p.description)}</div>`;
+        for(const ch of p.chapters){
+          let qtext;
+          if(p.source==='uploaded'){
+            qtext=`请以焊接工艺专家身份，参考已学习资料《${esc(p.name.replace('📄 ',''))}》中的「${esc(ch.title)}」章节（${esc(ch.meta||'')}），全面解释相关内容`;
+          }else{
+            qtext=`请以焊接工艺专家身份，全面介绍《材料焊接原理》中「${esc(ch.title)}」的核心内容`;
+          }
+          let metaHtml='';
+          if(ch.meta){metaHtml=`<span style="font-size:10px;color:var(--text-tertiary);margin-left:4px">${esc(ch.meta)}</span>`}
+          if(ch.summary&&p.source==='uploaded'){metaHtml+=`<div style="font-size:10px;color:var(--text-tertiary);margin-top:2px;line-height:1.3">${esc(ch.summary.substring(0,60))}...</div>`}
+          h+=`<button class="book-chapter" data-q="${esc(qtext)}" style="text-align:left;padding:10px 14px">${esc(ch.title)}${metaHtml}</button>`;
+        }
+        h+='</div>';
+      }
+      if(d.uploaded_sources>0){
+        h+=`<div style="margin-top:12px;padding:8px;background:var(--success-bg);border-radius:8px;font-size:11px;color:var(--success);text-align:center">✅ 已学习 ${d.uploaded_sources} 份外部资料</div>`;
+      }
+      body.innerHTML=h;body.dataset.loaded='1';
+      body.querySelectorAll('.book-chapter').forEach(btn=>{
+        btn.addEventListener('click',()=>{
+          const q=btn.dataset.q;if(q){$('#qinput').value=q;send(q);closeBookPanel()}
+        });
+      });
+    }catch(e){body.innerHTML='<p style="color:var(--text-tertiary)">加载失败</p>'}
+  }
+  panel.classList.add('open');overlay.classList.add('open')
+}
+function closeBookPanel(){$('#book-panel').classList.remove('open');$('#book-overlay').classList.remove('open')}
+
+/* ============================================================
+   PDF Upload Modal
+   ============================================================ */
+function openUploadModal(){
+  $('#upload-modal').classList.add('open');
+  loadUploadedFiles();
+}
+function closeUploadModal(){$('#upload-modal').classList.remove('open')}
+document.getElementById('upload-modal').addEventListener('click',function(e){if(e.target===this)closeUploadModal()});
+
+// Drag & drop
+const uz=document.getElementById('upload-zone');
+if(uz){
+  uz.addEventListener('dragover',e=>{e.preventDefault();uz.classList.add('drag')});
+  uz.addEventListener('dragleave',()=>uz.classList.remove('drag'));
+  uz.addEventListener('drop',e=>{e.preventDefault();uz.classList.remove('drag');handleFileSelect(e.dataTransfer.files)});
+}
+
+function handleFileSelect(files){
+  if(!files||!files.length)return;
+  const f=files[0];
+  if(!f.name.toLowerCase().endsWith('.pdf')){toast('仅支持PDF文件','err');return}
+  uploadPDF(f);
+}
+
+async function uploadPDF(file){
+  const status=$('#upload-status');
+  status.innerHTML='<div class="upload-status">⏳ 正在上传并解析PDF（文本+表格+图片）...</div>';
+  const fd=new FormData();fd.append('file',file);
+  try{
+    const r=await fetch('/api/upload-pdf',{method:'POST',body:fd});
+    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'上传失败')}
+    const d=await r.json();
+    let h=`<div class="upload-status ok">✅ 解析成功！已加入知识库，AI回答时将自动引用</div>`;
+    h+=`<div style="margin-top:12px;padding:12px;background:var(--surface-secondary);border-radius:8px;font-size:13px;line-height:1.7">`;
+    h+=`<strong>📄 ${esc(d.filename)}</strong><br>`;
+    h+=`📑 ${d.page_count}页 · 📝 ${(d.text_length||0).toLocaleString()}字符 · 📊 ${d.tables_count||0}个表格 · 🖼 ${d.images_count||0}张图片`;
+    if(d.tables&&d.tables.length){
+      h+=`<div style="margin-top:8px"><strong>📊 识别到的表格：</strong></div>`;
+      d.tables.slice(0,3).forEach((t,i)=>{
+        h+=`<details style="margin:4px 0"><summary>表格${i+1}（第${t.page}页，${t.rows?t.rows.length:0}行）</summary><pre style="font-size:11px;overflow-x:auto;white-space:pre;background:#fff;padding:8px;border-radius:4px;margin-top:4px">${esc(t.markdown||'')}</pre></details>`;
+      });
+    }
+    if(d.text_preview){
+      h+=`<details style="margin:4px 0"><summary>📝 文本预览（前500字）</summary><p style="font-size:12px;color:var(--text-secondary);white-space:pre-wrap;background:#fff;padding:8px;border-radius:4px;margin-top:4px;max-height:200px;overflow-y:auto">${esc(d.text_preview)}</p></details>`;
+    }
+    h+=`</div>`;
+    status.innerHTML=h;
+    toast('PDF解析完成！已加入RAG知识库');
+    loadUploadedFiles();
+    // 刷新LLM状态
+    checkLLMStatus();
+  }catch(e){
+    status.innerHTML=`<div class="upload-status err">❌ ${esc(e.message)}</div>`;
+  }
+}
+
+async function loadUploadedFiles(){
+  const list=$('#file-list');
+  try{
+    const r=await fetch('/api/uploaded-files');const d=await r.json();
+    if(!d.files||!d.files.length){list.innerHTML='<p style="color:var(--text-tertiary);font-size:13px;padding:8px 0">暂无上传的PDF资料</p>';return}
+    let h='<h4 style="margin:12px 0 8px;font-size:13px">📚 已导入资料（AI回答时将引用）</h4>';
+    d.files.forEach(f=>{
+      h+=`<div class="file-list-item"><span><span class="fli-name">📄 ${esc(f.name)}</span><span class="fli-info">${f.size_kb}KB</span></span><button class="fli-del" onclick="deleteUpload('${esc(f.name)}')">删除</button></div>`;
+    });
+    h+=`<p style="font-size:11px;color:var(--text-tertiary);margin-top:6px">💡 上传的资料已加入RAG知识库，AI回答问题时将自动检索并引用相关内容</p>`;
+    list.innerHTML=h;
+  }catch(e){}
+}
+
+async function deleteUpload(filename){
+  try{
+    await fetch('/api/uploaded-files/'+encodeURIComponent(filename),{method:'DELETE'});
+    toast('已删除');
+    loadUploadedFiles();
+  }catch(e){toast('删除失败','err')}
+}
+
+/* ============================================================
+   Send
+   ============================================================ */
+async function send(text){
+  if(busy)return;
+  const q=(text||$('#qinput').value).trim();
+  if(!q)return;
+  busy=true;$('#sendbtn').disabled=true;
+  const wel=$('#welcome');if(wel)wel.style.display='none';
+  if(text){$('#qinput').value=''}else{$('#qinput').value=''}
+  $('#qinput').style.height='auto';
+
+  appendUser(q);
+  const ty=appendTyping();
+  scrollDown();
+
+  try{
+    const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
+    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'请求失败')}
+    const d=await r.json();
+    ty.remove();
+    appendExpertCard(d);
+  }catch(e){
+    ty.remove();
+    appendErr(e.message);
+  }finally{
+    busy=false;$('#sendbtn').disabled=false;
+    $('#qinput').focus();scrollDown();
+  }
+}
+
+/* ============================================================
+   Render User
+   ============================================================ */
+function appendUser(t){
+  const now=new Date();
+  const time=`${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  const el=document.createElement('div');
+  el.className='msg user';
+  el.innerHTML=`<div class="msg-avatar">👤</div><div class="msg-content"><div class="msg-bubble">${esc(t)}</div><div class="msg-time">${time}</div></div>`;
+  $('#messages').appendChild(el);
+}
+
+function appendTyping(){
+  const el=document.createElement('div');
+  el.className='msg bot';
+  el.innerHTML=`<div class="msg-avatar">🔬</div><div class="msg-content"><div class="typing"><div class="typing-dots"><span></span><span></span><span></span></div><span class="typing-txt">AI焊接专家正在分析并生成深度内容...</span></div></div>`;
+  $('#messages').appendChild(el);return el;
+}
+
+function appendErr(m){
+  const el=document.createElement('div');
+  el.className='msg bot';
+  el.innerHTML=`<div class="msg-avatar">⚠️</div><div class="msg-content"><div class="err-card">❌ 查询出错：${esc(m)}</div></div>`;
+  $('#messages').appendChild(el);
+}
+
+/* ============================================================
+   Render Expert Card
+   ============================================================ */
+function appendExpertCard(d){
+  const el=document.createElement('div');
+  el.className='msg bot';
+
+  // Build keyword tags
+  let tags='';
+  if(d.keywords&&d.keywords.length)
+    tags+=d.keywords.slice(0,5).map(k=>`<span class="kw">${esc(k)}</span>`).join('');
+  if(d.matched_categories&&d.matched_categories.length)
+    tags+=d.matched_categories.slice(0,2).map(c=>`<span class="kw">${esc(c)}</span>`).join('');
+
+  // Build content
+  let bodyHTML='';
+
+  if(d.content&&d.content.length>50){
+    // LLM-generated markdown content
+    let md=d.content;
+    // Escape HTML first, let marked.js handle markdown
+    if(typeof marked!=='undefined'){
+      bodyHTML=marked.parse(md);
+    }else{
+      bodyHTML=`<pre style="white-space:pre-wrap">${esc(md)}</pre>`;
+    }
+  }else{
+    // Local knowledge base mode
+    const secs=d.sections||{};
+    for(const [key,sec] of Object.entries(secs)){
+      if(!sec||!sec.visible)continue;
+      if(sec.content){
+        bodyHTML+=`<h2>${esc(sec.title)}</h2>`;
+        if(typeof marked!=='undefined'){
+          bodyHTML+=marked.parse(sec.content);
+        }else{
+          bodyHTML+=`<p>${esc(sec.content)}</p>`;
+        }
+      }
+      if(sec.items&&sec.items.length){
+        bodyHTML+=`<h3>${esc(sec.title)}</h3><ul>`;
+        sec.items.forEach(i=>{bodyHTML+=`<li>${esc(i)}</li>`});
+        bodyHTML+='</ul>';
+      }
+    }
+  }
+
+  // References footer
+  let refHTML='';
+  const refs=d.references||[];
+  if(refs.length){
+    refHTML=`<div class="ref-section"><div class="ref-title">📚 理论参考来源</div>`;
+    refs.forEach(r=>{refHTML+=`<div class="ref-item"><span class="ref-dot"></span>${esc(r)}</div>`});
+    refHTML+='</div>';
+  }
+
+  // Sources from local mode
+  if(!refHTML&&d.sections&&d.sections.sources){
+    const src=d.sections.sources;
+    if(src.primary&&src.primary.length){
+      refHTML=`<div class="ref-section"><div class="ref-title">📚 参考来源</div>`;
+      src.primary.forEach(s=>{refHTML+=`<div class="ref-item"><span class="ref-dot"></span>${esc(s)}</div>`});
+      refHTML+='</div>';
+    }
+  }
+
+  el.innerHTML=`
+    <div class="msg-avatar">🔬</div>
+    <div class="msg-content" style="max-width:100%">
+      <div class="expert-card">
+        <div class="card-header">
+          <div class="card-header-left">
+            <span class="exp">🔍 AI焊接工艺专家</span>${tags}
+          </div>
+          <span class="card-model">${esc(d.model_used||'')} · ${(d.elapsed_ms||0).toFixed(0)}ms</span>
+        </div>
+        <div class="card-body">${bodyHTML}${refHTML}</div>
+      </div>
+      <div class="msg-time" style="margin-top:8px">${esc(d.disclaimer||'')}</div>
+    </div>`;
+
+  $('#messages').appendChild(el);
+
+  // Render Mermaid diagrams after DOM insertion
+  setTimeout(async ()=>{
+    const mermaidEls=el.querySelectorAll('.mermaid-placeholder');
+    for(const placeholder of mermaidEls){
+      try{
+        const code=placeholder.dataset.mermaid.replace(/\\n/g,'\n');
+        if(!code||code.trim().length<5){placeholder.remove();continue}
+        const {svg}=await mermaid.render('mermaid-'+Math.random().toString(36).slice(2),code);
+        const wrap=document.createElement('div');
+        wrap.className='mermaid-wrap';
+        wrap.innerHTML=`<div class="mermaid-label">📊 工艺流程图</div>${svg}`;
+        placeholder.replaceWith(wrap);
+      }catch(e){
+        placeholder.innerHTML='<div style="color:var(--text-tertiary);font-size:12px;padding:12px">📊 流程图（渲染失败，已跳过）</div>';
+      }
+    }
+    // Also look for ```mermaid code blocks rendered as <code class="language-mermaid">
+    el.querySelectorAll('code.language-mermaid').forEach(async (codeEl)=>{
+      try{
+        const code=codeEl.textContent;
+        // Skip if code looks invalid
+        if(!code||code.trim().length<5)return;
+        const {svg}=await mermaid.render('mermaid-'+Math.random().toString(36).slice(2),code);
+        const wrap=document.createElement('div');
+        wrap.className='mermaid-wrap';
+        wrap.innerHTML=`<div class="mermaid-label">📊 工艺流程图</div>${svg}`;
+        const pre=codeEl.closest('pre');
+        if(pre)pre.replaceWith(wrap);else codeEl.replaceWith(wrap);
+      }catch(e){
+        // Silently replace failed mermaid block with a note
+        const pre=codeEl.closest('pre');
+        if(pre)pre.outerHTML='<div class="mermaid-wrap" style="color:var(--text-tertiary);font-size:12px;padding:12px">📊 流程图（渲染失败，已跳过）</div>';
+      }
+    });
+
+    // Wrap plain text tables in .md-table-wrap
+    el.querySelectorAll('table').forEach(tbl=>{
+      if(!tbl.closest('.md-table-wrap')){
+        const wrap=document.createElement('div');
+        wrap.className='md-table-wrap';
+        tbl.parentNode.insertBefore(wrap,tbl);
+        wrap.appendChild(tbl);
+      }
+    });
+  },200);
+
+  scrollDown();
+}
+
+/* ============================================================
+   Clear Chat
+   ============================================================ */
+function clearChat(){
+  const msgs=$('#messages').querySelectorAll('.msg');
+  msgs.forEach(m=>m.remove());
+  const wel=$('#welcome');if(wel)wel.style.display='';
+}
+
+/* ============================================================
+   Events
+   ============================================================ */
+$('#sendbtn').addEventListener('click',()=>send());
+$('#qinput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
+$('#qinput').addEventListener('input',()=>{const t=$('#qinput');t.style.height='auto';t.style.height=Math.min(t.scrollHeight,130)+'px'});
+document.addEventListener('click',e=>{
+  const chip=e.target.closest('.welcome-chip');
+  if(chip&&chip.dataset.q){$('#qinput').value=chip.dataset.q;send(chip.dataset.q)}
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeBookPanel();closeUploadModal()}});
+$('#qinput').focus();
+</script>
+</body>
+</html>
