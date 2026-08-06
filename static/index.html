@@ -235,6 +235,22 @@ input,textarea{font-family:inherit;font-size:inherit}
   .card-body thead th,.card-body tbody td{padding:6px 8px}
   .modal{width:96vw}
 }
+
+/* ===== 工艺卡片打印（PDF/打印）===== */
+#print-area{display:none}
+@media print{
+  body *{visibility:hidden}
+  #print-area,#print-area *{visibility:visible}
+  #print-area{display:block;position:absolute;left:0;top:0;width:100%;padding:0;margin:0}
+  #print-area .pc-print-body{visibility:visible;color:#111;font-size:13px}
+  #print-area h1,#print-area h2,#print-area h3{color:#111;page-break-after:avoid}
+  #print-area table{width:100%;border-collapse:collapse;font-size:12px;margin:6px 0}
+  #print-area table th,#print-area table td{border:1px solid #444;padding:5px 8px;text-align:left}
+  #print-area table th{background:#eee}
+  #print-area .pc-block{margin-bottom:10px;padding:0 4px}
+  #print-area .no-print{display:none!important}
+  @page{margin:14mm}
+}
 </style>
 </head>
 <body>
@@ -673,6 +689,7 @@ function renderProcessCard(c){
 
   // JSON 导出（仿真/机器人导入）
   h+=`<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">`;
+  h+=`<button class="topbar-btn" onclick="printProcessCard(this)" data-json="${escH(JSON.stringify(c)).replace(/"/g,'&quot;')}">🖨️ 打印 / 导出PDF</button>`;
   h+=`<button class="topbar-btn" onclick="copyProcessCard(this)" data-json="${escH(JSON.stringify(c)).replace(/"/g,'&quot;')}">📋 复制JSON（仿真/机器人导入）</button>`;
   h+=`<button class="topbar-btn" onclick="toggleProcessJson(this)">🔍 查看JSON</button>`;
   h+='</div>';
@@ -851,6 +868,92 @@ document.addEventListener('click',e=>{
 });
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeBookPanel();closeUploadModal()}});
 $('#qinput').focus();
+
+/* ============================================================
+   工艺卡片打印 / 导出PDF
+   ============================================================ */
+function buildCardPrintHtml(c){
+  const H=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const el=c.electrical||{}, th=c.thermal||{}, jp=c.joint_prep||{}, pp=c.pass_plan||{},
+        qc=c.quality||{}, rp=c.robot_params||{}, eq=c.equipment||{};
+  const row=(k,v)=>v?`<tr><th style="width:30%;background:#f2f2f2">${H(k)}</th><td>${H(v)}</td></tr>`:'';
+  let h=`<div class="pc-print-body" style="font-family:'Microsoft YaHei',sans-serif">`;
+  h+=`<h1 style="text-align:center;font-size:18px;margin:0 0 4px">焊接工艺卡片 / WELDING PROCESS CARD</h1>`;
+  h+=`<div style="text-align:center;font-size:11px;color:#555;margin-bottom:12px">焊接工艺专家系统 · 工艺编号 ${new Date().toISOString().slice(0,10)}</div>`;
+
+  // 基本信息
+  h+=`<div class="pc-block"><h2 style="font-size:14px;border-bottom:2px solid #333;padding-bottom:3px">1️⃣ 基本信息</h2>`;
+  h+=`<table><tbody>`;
+  h+=row('母材 Base Material', c.base_material);
+  h+=row('板厚 Thickness', c.thickness_mm==null?'':String(c.thickness_mm)+'mm');
+  h+=row('焊接方法 Process', c.process);
+  h+=row('坡口形式 Groove', c.groove);
+  h+=row('装配间隙 Joint Gap', c.joint_gap_mm);
+  h+=row('焊接位置 Position', c.welding_position);
+  if(eq.robot_model)h+=row('机器人 Robot', `${eq.robot_model} / 焊枪 ${eq.torch_model||''} / 焊机 ${eq.welder_model||''} / 幅宽 ${eq.work_area_m2||''}㎡`);
+  h+='</tbody></table></div>';
+
+  // 焊接参数
+  h+=`<div class="pc-block"><h2 style="font-size:14px;border-bottom:2px solid #333;padding-bottom:3px">2️⃣ 焊接参数</h2>`;
+  h+=`<table><tbody>`;
+  h+=row('焊接电流 Current', el.current_a);
+  h+=row('电弧电压 Voltage', el.voltage_v);
+  h+=row('焊接速度 Travel Speed', el.travel_speed_cm_min);
+  h+=row('焊材 Consumables', c.consumables);
+  h+=row('焊条/焊丝直径 Electrode', c.electrode_diameter);
+  h+=row('保护气体 Shielding Gas', c.shielding_gas);
+  h+='</tbody></table></div>';
+
+  // 机器人参数
+  h+=`<div class="pc-block"><h2 style="font-size:14px;border-bottom:2px solid #333;padding-bottom:3px">3️⃣ 机器人参数 Robot Parameters</h2>`;
+  h+=`<table><tbody>`;
+  h+=row('焊接速度 Travel Speed', rp.travel_speed);
+  h+=row('焊枪倾角 Gun Angle', rp.gun_angle);
+  h+=row('干伸长 Stick-out', rp.stick_out);
+  h+=row('摆动宽度 Weave Width', rp.weave_width);
+  h+=row('摆动频率 Weave Freq', rp.weave_frequency);
+  h+=row('摆动脉冲 Weave Dwell', rp.weave_dwell);
+  h+='</tbody></table></div>';
+
+  // 工艺方案
+  h+=`<div class="pc-block"><h2 style="font-size:14px;border-bottom:2px solid #333;padding-bottom:3px">4️⃣ 工艺方案 Process Plan</h2>`;
+  h+=`<table><tbody>`;
+  h+=row('清理要求 Cleaning', jp.cleaning);
+  h+=row('定位焊 Tack Weld', jp.tack_weld);
+  h+=row('层道规划 Layers', pp.layers_passes);
+  h+=row('摆动方式 Weaving', pp.weaving);
+  h+=row('预热 Preheat', th.preheat);
+  h+=row('层间温度 Interpass', th.interpass_temp);
+  h+=row('后热 Post-heat', th.postheat);
+  h+='</tbody></table></div>';
+
+  // 质量评估
+  h+=`<div class="pc-block"><h2 style="font-size:14px;border-bottom:2px solid #333;padding-bottom:3px">5️⃣ 质量评估 Quality</h2>`;
+  h+=`<table><thead><tr><th style="width:18%">常见缺陷</th><th style="width:34%">产生原因</th><th>预防措施</th></tr></thead><tbody>`;
+  (qc.checks||[]).forEach(cd=>{ h+=`<tr><td>${H(cd.defect)}</td><td>${H(cd.cause)}</td><td>${H(cd.prevention)}</td></tr>`; });
+  h+='</tbody></table>';
+  h+=`<div style="font-size:11px;color:#555;margin-top:4px">检验要点：${H(qc.inspection||'')}</div></div>`;
+
+  // 签名栏
+  h+=`<div style="display:flex;justify-content:space-between;margin-top:16px;font-size:12px;color:#333">`;
+  h+=`<div>编制：<span style="display:inline-block;width:90px;border-bottom:1px solid #000">&nbsp;</span></div>`;
+  h+=`<div>审核：<span style="display:inline-block;width:90px;border-bottom:1px solid #000">&nbsp;</span></div>`;
+  h+=`<div>日期：${new Date().toISOString().slice(0,10)}</div>`;
+  h+='</div>';
+  h+='</div>';
+  return h;
+}
+function printProcessCard(btn){
+  let c=null;
+  try{c=JSON.parse(btn.dataset.json);}catch(e){toast('工艺卡片数据异常');return}
+  const area=document.getElementById('print-area');
+  if(!area){toast('打印区初始化失败');return}
+  area.innerHTML=buildCardPrintHtml(c);
+  // 稍等渲染后触发打印
+  setTimeout(()=>{window.print();},100);
+}
 </script>
+<!-- 工艺卡片打印容器（打印时显示，屏幕隐藏） -->
+<div id="print-area"></div>
 </body>
 </html>
