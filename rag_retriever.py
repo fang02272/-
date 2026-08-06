@@ -9,32 +9,54 @@ import re
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional
 
+import jieba
+
+
 # ============================================================
 # 简易 TF-IDF 检索器
 # ============================================================
 class SimpleRetriever:
-    """轻量级 TF-IDF 文本检索器，无需外部依赖"""
+    """基于 Jieba 分词的轻量级 TF-IDF 文本检索器"""
 
     def __init__(self):
         self.documents: List[dict] = []       # [{"id": str, "text": str, "source": str}, ...]
         self.doc_freq: Dict[str, int] = defaultdict(int)  # 词 → 出现文档数
         self.term_index: Dict[str, List[int]] = defaultdict(list)  # 词 → 文档ID列表
         self.doc_count = 0
+        self.tokenizer = jieba.Tokenizer()
+        self._load_welding_terms()
+
+    def _load_welding_terms(self):
+        """将现有焊接知识库术语注册到 Jieba，避免专业词被错误拆分。"""
+        domain_terms = {
+            "焊接热影响区",
+            "焊接工艺评定",
+            "焊后热处理",
+            "低合金高强钢",
+            "预热温度",
+        }
+        try:
+            from welding_knowledge_base import (
+                KEYWORD_CATEGORY_MAP,
+                PRACTICAL_HANDBOOK_KEYWORDS,
+            )
+            domain_terms.update(KEYWORD_CATEGORY_MAP)
+            domain_terms.update(PRACTICAL_HANDBOOK_KEYWORDS)
+        except ImportError:
+            pass
+
+        for term in domain_terms:
+            normalized = str(term).strip()
+            if len(normalized) >= 2 and re.search(r'[\u4e00-\u9fff]', normalized):
+                self.tokenizer.add_word(normalized, freq=100000)
 
     def _tokenize(self, text: str) -> List[str]:
-        """中文+英文混合分词"""
+        """使用 Jieba 搜索模式进行中英文混合分词。"""
         tokens = []
-        # 中文：按字符切分后做2-gram
-        chinese = re.findall(r'[一-鿿]+', text)
-        for seg in chinese:
-            # unigram
-            tokens.extend(list(seg))
-            # bigram
-            for i in range(len(seg) - 1):
-                tokens.append(seg[i:i+2])
-        # 英文/数字词
-        english = re.findall(r'[a-zA-Z0-9]+', text)
-        tokens.extend([t.lower() for t in english])
+        for raw_token in self.tokenizer.lcut_for_search(text, HMM=True):
+            token = raw_token.strip().lower()
+            if token and re.search(r'[a-z0-9\u4e00-\u9fff]', token):
+                tokens.append(token)
         return tokens
 
     def add_document(self, doc_id: str, text: str, source: str = ""):
@@ -63,7 +85,7 @@ class SimpleRetriever:
                 self.doc_freq[token] += 1
                 self.term_index[token].append(i)
 
-    def _tfidf_vector(self, tokens: List[str]) -> Dict[int, float]:
+    def _tfidf_vector(self, tokens: List[str]) -> Dict[str, float]:
         """计算词的 TF-IDF 向量 {token_id: weight}"""
         tf = defaultdict(int)
         for t in tokens:

@@ -281,4 +281,3 @@ A: `python inspect_knowledge.py` 或浏览器访问 `/api/knowledge/inspect`
 
 **Q: 如何批量导入多本书？**  
 A: 把所有PDF放入 `uploads/` → 运行 `python start.py` → 自动逐一学习。
-# PyCharmMisProject
