@@ -10,18 +10,22 @@
 | 层级 | 来源 | 规模 | 说明 |
 |------|------|------|------|
 | **第1层** | 《材料焊接原理》(王宗杰,2024) | 2篇9章 · 150+关键词 | 焊接理论核心，侧重冶金原理和材料焊接性 |
-| **第2层** | 《实用焊接工艺手册》(王洪光,2014) | 13章 · 1679关键词 · 9种材料参数 | 工艺工具书，侧重现场参数、焊材选型、板厚-电流对照 |
+| **第2层** | 《实用焊接工艺手册》(王洪光,2014) | 13章 · 1824关键词 · 9种材料参数 | 工艺工具书，侧重现场参数、焊材选型、板厚-电流对照 |
 | **第3层** | 用户上传PDF | 动态增长 | 自动学习（目录/章节/关键词/数据提取） |
 | **第4层** | 材料-参数结构化对照表 | 9种材料 · 6种焊条 · 6种工艺 | 精准参数查表，零token消耗 |
 
 ## v2.5 新增能力
 
+- **工艺卡片**：参数问题输出**机器可读 JSON 工艺卡片**（母材/板厚/工艺/坡口/电参数/机器人参数/质量评估 + 装备信息），供**仿真、机器人路径规划与操控**使用，减少示教时间
 - **意图路由**：概念问题 ↔ 工艺参数问题差异化回答（意图解析/工艺匹配为内部思考，不在前端展示）
 - **专家知识库**：106 概念条目（解析/应用拓展/工艺类型/来源），基座 `expert_kb.json`
 - **本地向量库**：numpy 特征向量 + 余弦检索，多本书增量压缩入库
 - **本地匹配优先**：高置信（≥0.78）直接返回本地答案，跳过 LLM
 - **结果缓存**：相同/相似问题 LRU+TTL 缓存，避免重复调用
 - **OCR 增强**：PaddleOCR 优先 + cv2 预处理 + 纠错字典 + 修复重复页 bug
+- **GPU 环境**：Python 3.12 + paddlepaddle-gpu(CUDA 11.8)，全系统单环境运行，扫描版自动 GPU 识别
+- **前端 GPU 上传**：扫描版 PDF 上传自动 GPU 识别（进度轮询），服务自带 GPU 时进程内直算
+- **命令行工艺卡片**：`tools/run_welding_qa.py` 与 Web 端共用引擎，参数问题直接输出工艺卡片
 
 ---
 
@@ -42,9 +46,10 @@ PyCharmMiscProject/
 │   ├── vector_store.py          #   本地向量库：numpy特征向量 + 增量索引
 │   ├── expert_knowledge_base.py #   专家基座：概念→解析/应用/工艺类型/来源
 │   ├── qa_router.py             #   意图路由：概念/参数判定 + 参数匹配
+│   ├── process_card.py          #   工艺卡片：结构化/机器可读 + 机器人参数 + 装备
 │   └── answer_cache.py          #   结果缓存：LRU+TTL+相似度命中
 │
-├── server.py                    # 【Web服务入口】FastAPI后端（所有API接口）
+├── server.py                    # 【Web服务入口】FastAPI后端（process_query 供 Web/CLI 共用）
 ├── start.py                     # 【启动入口】一键启动 + 自动学习uploads/PDF
 ├── requirements.txt             # 【依赖】Python包清单
 ├── README.md                    # 【本文档】
@@ -53,7 +58,9 @@ PyCharmMiscProject/
 │   ├── build_expert_kb.py       #   重建专家知识库 + 向量库（可重复执行）
 │   ├── inspect_knowledge.py     #   知识库自检（不调LLM）
 │   ├── relearn_book.py          #   重新学习指定手册
-│   ├── run_welding_qa.py        #   命令行问答
+│   ├── reocr_handbook.py        #   GPU 重跑手册 OCR
+│   ├── gpu_ingest.py            #   GPU 新书入库（OCR→学习→索引，一条命令）
+│   ├── run_welding_qa.py        #   命令行问答（参数问题输出工艺卡片）
 │   └── tests.py                 #   测试用例
 │
 ├── static/
@@ -79,64 +86,109 @@ PyCharmMiscProject/
 用户提问
     │
     ▼
-┌─────────────── 匹配引擎 ───────────────┐
-│ welding_qa_system.py                    │
-│  ├─ extract_keywords()  关键词提取      │
-│  │   ├─ 原书 150+ 映射                  │
-│  │   └─ 所有上传PDF关键词 (动态注入)     │
-│  ├─ match_categories()  类别映射        │
-│  └─ generate_structured() 结构化输出    │
-└───────────────┬─────────────────────────┘
-                │
-    ┌───────────▼───────────┐
-    │     RAG 检索           │
-    │  rag_retriever.py      │
-    │  TF-IDF + 余弦相似度    │
-    │  检索范围: 原书+所有PDF │
-    └───────────┬───────────┘
-                │
-    ┌───────────▼───────────┐
-    │   LLM 生成 (可选)      │
-    │  llm_service.py        │
-    │  System Prompt:        │
-    │  · 平等对待所有知识源  │
-    │  · 优先用上传资料数据  │
-    │  · 精确引用书名+章节   │
-    └───────────┬───────────┘
-                │
-                ▼
-        结构化回答 (5段式)
-    科普 → 交叉分析 → 推荐 → 来源 → 迁移
+① 结果缓存 (answer_cache.py)  ──命中──→  直接返回
+    │ 未命中
+    ▼
+② 本地分析 (welding_qa_system.py)
+   关键词/类别 + 专家库概念 + 向量检索
+    │
+    ▼
+③ 意图路由 (qa_router.py)   [内部思考·不展示]
+    ├─ 基本概念 → 概念解析 + 应用拓展 + 工艺类型 + 来源
+    └─ 工艺参数 → 工艺匹配 (内部) → 工艺卡片 process_card.py
+                     │
+                     ▼
+④ 本地匹配优先 (置信度≥0.78 或 卡片就绪)
+    ├─ 工艺卡片：机器可读 JSON（母材/板厚/工艺/电参数/机器人参数/质量评估/装备）
+    ├─ 概念解析：专家知识库条目 + PDF 来源
+    └─ 直接返回，跳过 LLM
+    │ 置信度不足
+    ▼
+⑤ LLM 兜底 (llm_service.py chat_intent)
+   意图感知 + 瘦身上下文，max_tokens 2000
+    │
+    ▼
+⑥ 结果缓存 (put) → 返回
+
+扫描版PDF → PaddleOCR(GPU) 自动识别 → learn_book → 向量库/专家库增量更新
 ```
+
+---
+
+## 🏷️ 工艺卡片（面向仿真 / 机器人路径规划 / 操控）
+
+参数问题（材料+板厚+工艺）会输出**机器可读的工艺卡片 JSON**，供智能引擎、仿真、机器人路径规划与操控直接使用，**减少示教时间**。
+
+### 卡片结构示例
+```json
+{
+  "base_material": "低碳钢", "thickness_mm": 12, "process": "SMAW (焊条电弧焊)",
+  "groove": "单V坡口 60°±5°（钝边1-2mm）", "joint_gap_mm": "2-3mm",
+  "electrical": {"current_a": "90-140A", "voltage_v": "20-36V", "travel_speed_cm_min": "5-40 cm/min"},
+  "thermal": {"preheat": "板厚<30mm: 不需预热", "interpass_temp": "≤250°C", "postheat": "一般不需要"},
+  "shielding_gas": "焊条药皮造渣+造气",
+  "pass_plan": {"layers_passes": "2层（打底+盖面）", "weaving": "锯齿形运条，摆动宽度≤9.6mm"},
+  "robot_params": {"travel_speed": "5-40 cm/min", "gun_angle": "70-80°", "stick_out": "焊条干伸长15-20mm",
+                   "weave_width": "锯齿形运条≤9.6mm", "weave_frequency": "0.5-1.0 Hz"},
+  "quality": {"checks": [{"defect": "烧穿", "cause": "电流过大", "prevention": "控制电流..."}], "inspection": "..."},
+  "equipment": {"robot_model": "MR2010_1", "torch_model": "APW50N", "welder_model": "NBC-500RP", "work_area_m2": 6},
+  "application": "..."
+}
+```
+
+### 关键特性
+- **确定性输出**：电参数/热参数取自基座三表（工艺/材料/焊条参数表），坡口/间隙/焊道/机器人参数由规则生成，不依赖 LLM 随机性 —— 适合机器人控制
+- **装备信息**：机器人型号、焊枪、焊机、作业幅宽在 `app/config.yaml` 的 `equipment` 段配置
+- **推理隐藏**：意图解析、工艺匹配等思考过程不展示，前端只显示工艺卡片
+- **JSON 导出**：Web 端卡片带「复制JSON」按钮；命令行 `tools/run_welding_qa.py` 直接打印卡片
+
+### 机器人参数（可后续按实机标定）
+| 工艺 | 焊枪倾角 | 干伸长 |
+|---|---|---|
+| SMAW 焊条电弧焊 | 70-80°（后倾5-10°） | 焊条干伸长 15-20mm |
+| GTAW/TIG 钨极氩弧焊 | 75-85° | 钨极伸出 3-5mm |
+| GMAW/MIG 熔化极氩弧焊 | 80-90° | 导电嘴到工件 10-15mm |
+| FCAW 药芯焊丝 | 80-90° | 导电嘴到工件 15-25mm |
+| SAW 埋弧自动焊 | 75-85° | 焊丝伸出 25-40mm |
 
 ---
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 环境（推荐 GPU 环境，扫描 OCR 用 GPU）
 ```bash
-pip install -r requirements.txt
+# 本机已内置 .venv-gpu（Python 3.12 + paddlepaddle-gpu CUDA 11.8 + 全部应用依赖）
+.venv-gpu\Scripts\python.exe start.py
 ```
+> 若在 PyCharm：Project Interpreter 设为 `E:\PyCharmMisProject\.venv-gpu\Scripts\python.exe`
 
 ### 2. 配置 LLM（可选）
-编辑 `config.yaml`，填入 API Key：
+编辑 `app/config.yaml`，填入 API Key：
 ```yaml
 llm:
   api_base: "https://api.deepseek.com/v1"
   api_key: "sk-your-key"
   model: "deepseek-chat"
 ```
-不配置也可运行（本地知识库模式，不消耗token）。
+不配置也可运行（本地知识库 + 工艺卡片模式，不消耗token）。
 
 ### 3. 导入工艺手册
-将焊接工艺 PDF 放入 `uploads/` 文件夹。
+将焊接工艺 PDF 放入 `uploads/` 文件夹，或在网页端直接上传。
 
 ### 4. 启动
 ```bash
-python start.py
+.venv-gpu\Scripts\python.exe start.py
 # → http://localhost:8000
 ```
-启动时自动学习 `uploads/` 中所有 PDF（文本版直接提取，扫描版需Tesseract OCR）。
+- 文字版 PDF：直接提取学习
+- **扫描版 PDF**：自动 GPU 识别（前端上传显示进度，约1.5秒/页）
+- 启动时自动学习 `uploads/` 中所有新 PDF
+
+### 5. 命令行工艺卡片（与 Web 共用引擎）
+```bash
+.venv-gpu\Scripts\python.exe tools/run_welding_qa.py "Q345钢板12mm预热温度"
+.venv-gpu\Scripts\python.exe tools/run_welding_qa.py "304不锈钢 3mm TIG焊"
+```
 
 ---
 
@@ -144,13 +196,13 @@ python start.py
 
 ```bash
 # 查看所有已学习书籍
-python inspect_knowledge.py
+.venv-gpu\Scripts\python.exe tools/inspect_knowledge.py
 
 # 测试关键词匹配效果
-python inspect_knowledge.py "弧焊机器人焊接参数"
+.venv-gpu\Scripts\python.exe tools/inspect_knowledge.py "弧焊机器人焊接参数"
 
 # 查看完整目录
-python inspect_knowledge.py --chapters
+.venv-gpu\Scripts\python.exe tools/inspect_knowledge.py --chapters
 
 # 浏览器在线查看
 http://localhost:8000/api/knowledge/inspect?q=焊接参数
@@ -162,9 +214,10 @@ http://localhost:8000/api/knowledge/inspect?q=焊接参数
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `POST` | `/api/query` | 问答（LLM生成或本地回退） |
-| `POST` | `/api/upload-pdf` | 上传单个PDF学习 |
+| `POST` | `/api/query` | 问答（概念/工艺卡片/LLM兜底，返回 `process_card`） |
+| `POST` | `/api/upload-pdf` | 上传单个PDF（扫描版自动GPU识别，返回 `job_id`） |
 | `POST` | `/api/upload-pdfs` | 批量上传多个PDF |
+| `GET` | `/api/upload-status/{job_id}` | GPU 识别任务进度（含页进度） |
 | `GET` | `/api/categories` | 知识目录（原书+已学习PDF） |
 | `GET` | `/api/knowledge/inspect?q=` | 知识库自检（不调LLM） |
 | `GET` | `/api/config/status` | LLM配置状态 |
@@ -174,36 +227,45 @@ http://localhost:8000/api/knowledge/inspect?q=焊接参数
 
 ## 如何添加新工艺手册
 
+### 方式一：前端上传（推荐，最简）
 ```
-1. PDF 放入 uploads/ 文件夹
-2. 重启 python start.py
-3. 启动日志显示学习结果
-4. python inspect_knowledge.py 验证
-5. 前端 📖书籍目录 查看新书目录树
-6. 提问时自动匹配新书内容
+1. 网页上传 PDF（扫描版自动 GPU 识别，显示页进度）
+2. 完成后自动入库 + 索引更新，直接提问即可检索
+```
+- 文字版：秒级完成
+- 扫描版：GPU 识别（约1.5秒/页），超 50MB 的大书走方式二
+
+### 方式二：命令行 GPU 入库（大扫描书）
+```bash
+# 1. 把 PDF 放入 uploads/ 目录
+# 2. GPU 一条命令：OCR → 学习 → 索引
+.venv-gpu\Scripts\python.exe tools/gpu_ingest.py 新书.pdf
 ```
 
-**扫描版PDF**: 需先安装 Tesseract OCR  
-https://github.com/UB-Mannheim/tesseract/wiki  
-安装时勾选 Chinese Simplified 语言包
+### 验证
+```bash
+.venv-gpu\Scripts\python.exe tools/inspect_knowledge.py
+.venv-gpu\Scripts\python.exe tools/run_welding_qa.py "新书的工艺参数问题"
+```
 
 ---
 
 ## 演进路线图
 
-### 当前 (v2.0) — 完成
-- [x] LLM + RAG 双引擎
-- [x] 《材料焊接原理》9章完整结构化
-- [x] PDF自动学习（目录/章节/关键词/数据）
-- [x] 多书知识融合匹配
-- [x] 扫描PDF OCR识别
-- [x] 知识库自检工具
+### 当前 (v2.5) — 完成
+- [x] 专家知识库（106 概念条目）+ 本地向量库（numpy 余弦）
+- [x] 意图路由：概念 ↔ 工艺参数差异化回答
+- [x] **工艺卡片**：机器可读 JSON + 机器人参数 + 装备信息（仿真/机器人用）
+- [x] 本地匹配优先 + 结果缓存（LRU+TTL+相似度）
+- [x] GPU OCR（PaddleOCR + cv2 预处理 + 纠错字典）+ 前端 GPU 上传
+- [x] 命令行工艺卡片（run_welding_qa.py 与 Web 共用引擎）
+- [x] 多书增量入库（gpu_ingest.py 一条命令）
 
-### 下一步 (v2.5) — 提高精准度，减少token
-- [ ] **本地匹配优先**：关键词匹配命中度高时直接返回本地内容，跳过LLM
-- [ ] **结果缓存**：相同/相似问题缓存答案，避免重复调用
-- [ ] **参数化回答模板**：高频问题（如"XX板厚焊XX材料用什么参数"）走模板+知识库填充，零token
-- [ ] **分层检索**：先用本地知识库回答，LLM仅做润色和补充
+### 下一步 (v2.6)
+- [ ] **工艺卡片标定**：按实际机器人（MR2010_1）标定焊枪角/干伸长/摆动
+- [ ] **焊道级路径**：由板厚/坡口自动生成机器人焊道序列（打底/填充/盖面）
+- [ ] **工况输入**：支持工件类型/坡口角度/焊接位置 细化卡片
+- [ ] **工艺卡片回归测试**：标准参数问答对 + 准确率评估
 
 ### 远期 (v3.0) — 专属焊接大模型
 - [ ] **领域微调**：用积累的问答对微调开源模型（Qwen/Llama）
@@ -217,10 +279,10 @@ https://github.com/UB-Mannheim/tesseract/wiki
 
 | 方案 | 效果 | 实施难度 |
 |------|------|---------|
-| Tesseract OCR + 中文包 | 扫描件基础识别 | ★☆☆ 已实现 |
-| 提高OCR DPI (300→600) | 识别率提升30% | ★☆☆ 改参数 |
-| PaddleOCR (百度OCR) | 中文识别率更高 | ★★☆ pip安装 |
-| 扫描件预处理 (去噪/纠偏) | 大幅提升 | ★★☆ OpenCV |
+| PaddleOCR (GPU, CUDA 11.8) | 中文识别率~95%，1.5秒/页 | ★☆☆ 已实现 |
+| cv2 预处理（去噪/CLAHE/纠偏/放大） | 大幅提升弱对比扫描件 | ★☆☆ 已实现 |
+| OCR 纠错字典（氩弧焊/钨极/CO₂ 等46条） | 修正识别错误 | ★☆☆ 已实现 |
+| Tesseract OCR + 中文包 | 备用引擎 | ★☆☆ 已实现 |
 | 表格专用OCR (TableBank) | 表格数据提取 | ★★★ 需训练 |
 
 ## 提高匹配推荐率的方案
@@ -283,21 +345,33 @@ assert len(result['sections']['science']['content']) > 100
 | pdfplumber | PDF表格提取 |
 | PyPDF2 | PDF备用提取 |
 | python-multipart | 文件上传 |
-| pytesseract + Pillow | 扫描PDF OCR（可选） |
+| numpy | 本地向量库 |
+| paddlepaddle-gpu (CUDA 11.8) | GPU 推理（`.venv-gpu` 环境） |
+| paddleocr | 扫描件中文 OCR |
+| opencv-python + Pillow | OCR 预处理 / 图片 |
+| pytesseract | 备用 OCR（可选） |
+
+> 推荐使用项目内置的 `.venv-gpu` 环境（已全部装好，含 GPU paddle）。
 
 ---
 
 ## 常见问题
 
 **Q: 端口冲突 (10013/10048)？**  
-A: `python start.py` 会自动释放端口。不要手动运行 `python server.py`。
+A: `start.py` 会自动释放端口。不要手动运行 `server.py`。
 
 **Q: 上传PDF后显示0章0关键词？**  
-A: PDF是扫描版（图片），需安装Tesseract OCR。文字版PDF不存在此问题。
+A: PDF是扫描版（图片）时，用 GPU 环境（`.venv-gpu`）上传会自动识别；文字版PDF直接提取。
+
+**Q: 扫描版PDF上传很慢？**  
+A: 确认服务跑在 `.venv-gpu`（GPU 1.5秒/页）。若在 CPU 环境，扫描版走 GPU 子进程；超大书（>50MB）用 `tools/gpu_ingest.py`。
 
 **Q: 如何不花token检查知识库？**  
-A: `python inspect_knowledge.py` 或浏览器访问 `/api/knowledge/inspect`
+A: `python tools/inspect_knowledge.py` 或浏览器访问 `/api/knowledge/inspect`
+
+**Q: 工艺卡片里的机器人参数是哪里来的？**  
+A: 规则经验值（`app/process_card.py`），可按实际机器人标定；装备型号在 `app/config.yaml` 的 `equipment` 段。
 
 **Q: 如何批量导入多本书？**  
-A: 把所有PDF放入 `uploads/` → 运行 `python start.py` → 自动逐一学习。
-# PyCharmMisProject
+A: 前端批量上传，或把所有PDF放入 `uploads/` → 运行 `.venv-gpu\Scripts\python.exe tools/gpu_ingest.py 每本.pdf`。
+
