@@ -16,10 +16,12 @@ GPU 新书入库工具 — 一条命令完成：GPU OCR → 学习入库 → 专
 """
 
 import sys
+import os
 import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+os.chdir(str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 DEFAULT_PDF = "实用焊接工艺手册_第二版.pdf"

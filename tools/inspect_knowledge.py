@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+os.chdir(str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Use UTF-8 mode if available
