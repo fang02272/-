@@ -6,6 +6,7 @@
   python tests.py --match      # 仅关键词匹配测试
   python tests.py --knowledge  # 仅知识库完整性测试
   python tests.py --e2e        # 仅端到端测试
+  python tests.py --tokenize   # 仅Jieba分词与检索测试
 
 所有测试不调用大模型API，纯本地验证
 """
@@ -51,6 +52,53 @@ E2E_TESTS = [
 def green(s): return f"\033[92m{s}\033[0m"
 def red(s): return f"\033[91m{s}\033[0m"
 def yellow(s): return f"\033[93m{s}\033[0m"
+
+
+def test_jieba_tokenization():
+    """Jieba分词测试 — 验证专业词保留且不产生机械双字噪声"""
+    from rag_retriever import SimpleRetriever
+
+    retriever = SimpleRetriever()
+    tokens = retriever._tokenize("Q345钢板预热温度")
+
+    expected_terms = ["q345", "钢板", "预热", "温度"]
+    forbidden_terms = ["板预", "热温"]
+    checks = [
+        *[(f"保留专业词: {term}", term in tokens) for term in expected_terms],
+        *[(f"不产生机械双字: {term}", term not in tokens) for term in forbidden_terms],
+    ]
+
+    retriever.add_document(
+        "relevant",
+        "Q345钢板厚度超过25mm时，应根据碳当量和拘束度确定预热温度。",
+        "test",
+    )
+    retriever.add_document(
+        "unrelated",
+        "弧焊机器人需要进行轨迹规划、焊缝跟踪和运动速度控制。",
+        "test",
+    )
+    results = retriever.search("Q345钢板预热温度", top_k=2)
+    checks.append(("相关文档排在首位", bool(results) and results[0]["id"] == "relevant"))
+
+    print(f"\n{'='*50}")
+    print("✂️ Jieba分词与检索测试")
+    print(f"{'='*50}")
+    print(f"\n  输入: {yellow('Q345钢板预热温度')}")
+    print(f"  分词: {', '.join(tokens)}")
+
+    passed = 0
+    failed = 0
+    for desc, ok in checks:
+        status = green("✓") if ok else red("✗")
+        print(f"    {status} {desc}")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}通过, {failed}失败")
+    return failed == 0
 
 
 def test_knowledge_integrity():
@@ -240,6 +288,9 @@ def test_cross_source_search():
 if __name__ == "__main__":
     run_all = len(sys.argv) == 1
     results = {}
+
+    if run_all or "--tokenize" in sys.argv:
+        results['tokenization'] = test_jieba_tokenization()
 
     if run_all or "--knowledge" in sys.argv:
         results['knowledge'] = test_knowledge_integrity()

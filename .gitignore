@@ -1,0 +1,25 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# IDE files
+.idea/
+*.iml
+
+# Secrets and local configuration
+.env
+.env.*
+config.yaml
+config.local.yaml
+
+# Uploaded/source documents and generated knowledge data
+uploads/
+saved_knowledge/
+*.pdf
+welding_book_full.txt
+
+# Runtime artifacts
+*.log
+*.tmp
