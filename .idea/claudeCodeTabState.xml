@@ -7,10 +7,10 @@
           <value>
             <TabSessionState>
               <option name="provider" value="claude" />
-              <option name="sessionId" value="f12a3d8d-15f0-4d3a-95b8-d58674b14194" />
-              <option name="cwd" value="C:\Users\78008\PyCharmMiscProject" />
-              <option name="model" value="claude-sonnet-4-6[1m]" />
-              <option name="permissionMode" value="default" />
+              <option name="sessionId" value="11cfc83d-c347-424c-bc12-3d79e95b5782" />
+              <option name="cwd" value="E:\PyCharmMisProject" />
+              <option name="model" value="claude-haiku-4-5" />
+              <option name="permissionMode" value="acceptEdits" />
             </TabSessionState>
           </value>
         </entry>

@@ -1,0 +1,54 @@
+# 焊接工艺专家系统 — 配置文件
+# LLM 大模型配置（OpenAI 兼容接口）
+
+llm:
+  # API 端点 — 支持任意 OpenAI 兼容接口
+  # DeepSeek: https://api.deepseek.com/v1
+  # Kimi: https://api.moonshot.cn/v1
+  # 通义千问: https://dashscope.aliyuncs.com/compatible-mode/v1
+  # 本地 Ollama: http://localhost:11434/v1
+  api_base: "https://api.deepseek.com/v1"
+  api_key: "sk-1836b5a6a45649e2ae2423dfe5a472b3"
+  model: "deepseek-chat"
+  max_tokens: 2000
+  temperature: 0.3
+  timeout_seconds: 120
+
+# 本地知识库配置
+knowledge:
+  # 上传PDF存储目录
+  upload_dir: "uploads"
+  # 全文检索的段落大小（字符数）
+  chunk_size: 800
+  # 检索时返回的最大段落数
+  top_k: 10
+
+# 意图路由 + 本地匹配置信度（v2.5 新增）
+routing:
+  # 证据权重
+  concept_exact: 0.85      # 专家库概念精确命中（别名反查命中规范词）
+  param_complete: 0.90     # 材料+工艺+板厚 三者命中对应参数表
+  param_partial: 0.55      # 仅工艺 或 仅材料/板厚 命中
+  base: 0.20               # 兜底置信度
+  # 阈值
+  local_high: 0.78         # ≥ → 直接返回本地内容，跳过 LLM
+  local_medium: 0.55       # [medium, high) → LLM + 紧凑 prompt 综合
+
+# 答案缓存（v2.5 新增）
+cache:
+  max_entries: 200         # LRU 容量
+  ttl_seconds: 3600        # 过期时间
+  sim_threshold: 0.80      # 相似命中：余弦阈值
+  jaccard_floor: 0.80      # 相似命中：中文/数字字符集合 Jaccard 阈值
+
+# 向量库（v2.5 新增）
+vector:
+  dim: 4096                # 特征向量维度
+  index_dir: "saved_knowledge/vector_index"
+
+# 机器人装备配置（v2.5 工艺卡片引用）
+equipment:
+  robot_model: "MR2010_1"      # 机器人型号
+  torch_model: "APW50N"        # 焊枪型号
+  work_area_m2: 6              # 作业幅宽（㎡）
+  welder_model: "NBC-500RP"    # 焊机型号

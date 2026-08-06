@@ -39,9 +39,9 @@ def kill_port(port: int):
 
 
 def auto_learn_uploads():
-    """启动时自动学习 uploads/ 中尚未入库的PDF"""
-    from knowledge_store import get_store
-    from pdf_parser import get_parser
+    """启动时自动学习 uploads/ 中尚未入库的PDF，并构建向量库 + 专家知识库"""
+    from app.knowledge_store import get_store
+    from app.pdf_parser import get_parser
 
     upload_dir = PROJECT_ROOT / "uploads"
     if not upload_dir.exists():
@@ -53,47 +53,56 @@ def auto_learn_uploads():
 
     store = get_store()
     parser = get_parser()
-    known = {s["filename"] for s in store.list_sources()}
-    new_pdfs = [p for p in pdfs if p.name not in known]
+    # 比较时统一去掉 .pdf 后缀，避免 registry 中 filename 带/不带后缀造成重复学习
+    known = {s["filename"].replace('.pdf', '').strip() for s in store.list_sources()}
+    new_pdfs = [p for p in pdfs if p.name.replace('.pdf', '').strip() not in known]
 
     if not new_pdfs:
         print(f"   📂 uploads/: {len(pdfs)} 个PDF，全部已学习")
-        return
 
-    print(f"   📂 发现 {len(new_pdfs)} 本新书，正在自动学习...")
-    from rag_retriever import get_rag
-    rag = get_rag()
+    if new_pdfs:
+        print(f"   📂 发现 {len(new_pdfs)} 本新书，正在自动学习...")
+        for pdf_path in new_pdfs:
+            try:
+                print(f"      ⏳ {pdf_path.name}...")
+                parsed = parser.parse(str(pdf_path))
+                store.learn_book(
+                    filename=pdf_path.name,
+                    full_text=parsed["full_text"],
+                    tables=parsed["tables"],
+                    page_count=parsed["page_count"],
+                    images=parsed["images"],
+                )
+                src = store.get_source(pdf_path.name.replace('.pdf', '')[:40])
+                ch = src.get("chapter_count", 0) if src else 0
+                kw = src.get("keyword_count", 0) if src else 0
+                print(f"      ✅ {pdf_path.name} — {ch}章, {kw}关键词, {parsed['text_length']}字")
+            except Exception as e:
+                print(f"      ❌ {pdf_path.name} — {e}")
 
-    for pdf_path in new_pdfs:
-        try:
-            print(f"      ⏳ {pdf_path.name}...")
-            parsed = parser.parse(str(pdf_path))
-            store.learn_book(
-                filename=pdf_path.name,
-                full_text=parsed["full_text"],
-                tables=parsed["tables"],
-                page_count=parsed["page_count"],
-                images=parsed["images"],
+    # 构建 向量库 + 专家知识库（替代原 RAG 全量重建）
+    try:
+        from app.vector_store import VectorIndex, index_book_chapters
+        from app.expert_knowledge_base import ExpertKnowledgeBase
+
+        vi = VectorIndex()
+        vi.clear_all()
+        kb = ExpertKnowledgeBase()
+        kb.build(store)
+        for canonical, entry in kb.concepts.items():
+            vi.add_document(
+                f"expert/{canonical}",
+                f"概念：{entry['name']}（{'，'.join(entry['aliases'][:6])}）\n{entry['definition']}\n{entry['application']}",
+                meta={"source": "expert", "kind": "expert", "chapter": f"概念：{entry['name']}"},
             )
-            src = store.get_source(pdf_path.name.replace('.pdf', '')[:40])
-            ch = src.get("chapter_count", 0) if src else 0
-            kw = src.get("keyword_count", 0) if src else 0
-            print(f"      ✅ {pdf_path.name} — {ch}章, {kw}关键词, {parsed['text_length']}字")
-        except Exception as e:
-            print(f"      ❌ {pdf_path.name} — {e}")
+        for src in store.list_sources():
+            index_book_chapters(store, src["id"], vi)
+        vi.save()
+        print(f"   🧠 专家知识库 {len(kb.concepts)} 概念 + 向量库 {len(vi.ids)} 行")
+    except Exception as e:
+        print(f"   ⚠️ 索引构建失败: {e}")
 
-    # 重建RAG
-    rag.remove_pdf_documents()
-    for src in store.list_sources():
-        chapters = store.get_chapters(src["id"])
-        for ch in chapters:
-            chunk = f"《{src['filename']}》 {ch['title']}\n{ch.get('summary','')}\n{ch.get('content','')[:1000]}"
-            rag.add_pdf_document(f"{src['id']}_{ch['title'][:30]}", chunk)
-    all_texts = store.get_all_full_texts()
-    if all_texts:
-        rag.add_pdf_document("all_uploads", all_texts)
-
-    print(f"   ✅ 学习完成，知识库现有 {len(store.list_sources())} 本书")
+    print(f"   ✅ 知识库现有 {len(store.list_sources())} 本书")
 
 
 def main():
@@ -123,7 +132,7 @@ def main():
 
     # 检查 LLM 状态
     try:
-        from llm_service import get_client
+        from app.llm_service import get_client
         llm = get_client()
         llm_status = f"✅ 已连接 ({llm.model})" if llm.available else "⚠️ 未配置 (本地模式)"
     except Exception:
