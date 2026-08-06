@@ -8,3 +8,4 @@ PyPDF2
 python-multipart
 pytesseract
 Pillow
+jieba
