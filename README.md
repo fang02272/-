@@ -1,6 +1,6 @@
-# 焊接工艺知识问答系统 v2.0
+# 焊接工艺知识问答系统 v2.5
 
-> AI大模型 + 双书知识库 + PDF持续学习 + 材料参数结构化查表  
+> AI大模型 + 专家知识库 + 本地向量库 + PDF持续学习 + 意图路由  
 > 目标：打造焊接领域专属知识问答引擎，减少通用大模型token消耗，提高工艺推荐精准度
 
 ---
@@ -10,9 +10,18 @@
 | 层级 | 来源 | 规模 | 说明 |
 |------|------|------|------|
 | **第1层** | 《材料焊接原理》(王宗杰,2024) | 2篇9章 · 150+关键词 | 焊接理论核心，侧重冶金原理和材料焊接性 |
-| **第2层** | 《实用焊接工艺手册》(王洪光,2014) | 13章 · 213关键词 · 9种材料参数 | 工艺工具书，侧重现场参数、焊材选型、板厚-电流对照 |
+| **第2层** | 《实用焊接工艺手册》(王洪光,2014) | 13章 · 1679关键词 · 9种材料参数 | 工艺工具书，侧重现场参数、焊材选型、板厚-电流对照 |
 | **第3层** | 用户上传PDF | 动态增长 | 自动学习（目录/章节/关键词/数据提取） |
 | **第4层** | 材料-参数结构化对照表 | 9种材料 · 6种焊条 · 6种工艺 | 精准参数查表，零token消耗 |
+
+## v2.5 新增能力
+
+- **意图路由**：概念问题 ↔ 工艺参数问题差异化回答（意图解析/工艺匹配为内部思考，不在前端展示）
+- **专家知识库**：106 概念条目（解析/应用拓展/工艺类型/来源），基座 `expert_kb.json`
+- **本地向量库**：numpy 特征向量 + 余弦检索，多本书增量压缩入库
+- **本地匹配优先**：高置信（≥0.78）直接返回本地答案，跳过 LLM
+- **结果缓存**：相同/相似问题 LRU+TTL 缓存，避免重复调用
+- **OCR 增强**：PaddleOCR 优先 + cv2 预处理 + 纠错字典 + 修复重复页 bug
 
 ---
 
@@ -21,35 +30,45 @@
 ```
 PyCharmMiscProject/
 │
-├── start.py                      # 【启动入口】一键启动 + 自动学习uploads/PDF
-├── server.py                     # 【Web服务】FastAPI后端，所有API接口
-├── config.yaml                   # 【配置】LLM API密钥/模型/参数
-├── requirements.txt              # 【依赖】Python包清单
-├── inspect_knowledge.py          # 【自检工具】不调LLM，纯本地查知识库
-├── README.md                     # 【本文档】
+├── app/                         # 【核心应用包】
+│   ├── server.py                #  （见根目录入口）
+│   ├── config.yaml              #   LLM API密钥/模型/路由阈值/缓存配置
+│   ├── llm_service.py           #   LLM层：OpenAI兼容接口 + 意图感知压缩 prompt
+│   ├── welding_qa_system.py     #   匹配引擎：关键词提取→类别映射→结构化输出
+│   ├── welding_knowledge_base.py#   基座知识：1173关键词映射 + 6工艺 + 9材料参数
+│   ├── knowledge_store.py       #   知识存储：PDF学习 + 目录/章节/关键词持久化
+│   ├── pdf_parser.py            #   PDF解析：文本/表格/图片 + PaddleOCR扫描件
+│   ├── rag_retriever.py         #   RAG检索（兜底）：TF-IDF + 余弦相似度
+│   ├── vector_store.py          #   本地向量库：numpy特征向量 + 增量索引
+│   ├── expert_knowledge_base.py #   专家基座：概念→解析/应用/工艺类型/来源
+│   ├── qa_router.py             #   意图路由：概念/参数判定 + 参数匹配
+│   └── answer_cache.py          #   结果缓存：LRU+TTL+相似度命中
 │
-├── llm_service.py                # 【LLM层】OpenAI兼容接口 + 焊接专家System Prompt
-├── welding_qa_system.py          # 【匹配引擎】关键词提取→类别映射→结构化输出
-├── welding_knowledge_base.py     # 【核心知识】150+关键词映射 + 9章科普 + 3大深度分析
-├── rag_retriever.py              # 【RAG检索】TF-IDF全文索引 + 余弦相似度排序
-├── knowledge_store.py            # 【知识库存储】上传PDF学习 + 目录提取 + 持久化
-├── pdf_parser.py                 # 【PDF解析】PyMuPDF文本/表格/图片 + OCR扫描件
+├── server.py                    # 【Web服务入口】FastAPI后端（所有API接口）
+├── start.py                     # 【启动入口】一键启动 + 自动学习uploads/PDF
+├── requirements.txt             # 【依赖】Python包清单
+├── README.md                    # 【本文档】
+│
+├── tools/                       # 【工具脚本】
+│   ├── build_expert_kb.py       #   重建专家知识库 + 向量库（可重复执行）
+│   ├── inspect_knowledge.py     #   知识库自检（不调LLM）
+│   ├── relearn_book.py          #   重新学习指定手册
+│   ├── run_welding_qa.py        #   命令行问答
+│   └── tests.py                 #   测试用例
 │
 ├── static/
-│   └── index.html                # 【前端UI】聊天界面 + Markdown/Mermaid渲染 + PDF上传
+│   └── index.html               # 【前端UI】聊天界面 + Markdown/Mermaid渲染 + PDF上传
 │
-├── uploads/                      # 【上传目录】放入PDF → 启动自动学习
-├── saved_knowledge/              # 【知识存储】已学习书籍的文本/目录/关键词/数据
-│   ├── registry.json             #   知识源注册表
-│   └── {book_id}/
-│       ├── full_text.txt         #   完整文本
-│       ├── structure.json        #   章节目录
-│       ├── chapters.json         #   每章内容+关键词+摘要
-│       ├── keywords.json         #   全书关键词
-│       ├── data_points.json      #   焊接参数数据
-│       └── table_*.md            #   提取的表格
+├── uploads/                     # 【上传目录】放入PDF → 启动自动学习
+├── saved_knowledge/             # 【知识存储】
+│   ├── registry.json            #   知识源注册表
+│   ├── expert_kb.json           #   专家知识库（概念条目）
+│   ├── vector_index/            #   本地向量库（npy + meta）
+│   ├── answer_cache.json        #   问答结果缓存
+│   └── {book_id}/               #   每本书：full_text/chapters/keywords/data_points
 │
-└── welding_book_full.txt         # 【原始资料】《材料焊接原理》PDF全文提取
+├── data/                        # 【原始资料】welding_book_full.txt 等
+└── __pycache__/                 #   Python字节码缓存
 ```
 
 ---

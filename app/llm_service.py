@@ -97,10 +97,11 @@ class LLMClient:
         self.timeout = llm_cfg.get("timeout_seconds", 120)
         self.available = bool(self.api_key and self.api_key not in ("sk-your-api-key-here", ""))
 
-    def chat(self, messages: list, stream: bool = False) -> Optional[str]:
+    def chat(self, messages: list, stream: bool = False, max_tokens: int = None) -> Optional[str]:
         """
         调用 LLM，返回生成的文本
         失败时返回 None
+        max_tokens: 覆盖默认值（压缩 prompt 时用较小值加快响应）
         """
         if not self.available:
             return None
@@ -113,7 +114,7 @@ class LLMClient:
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "temperature": self.temperature,
             "stream": stream,
         }
@@ -133,6 +134,71 @@ class LLMClient:
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
         return None
+
+    def chat_intent(self, user_message: str, intent: str = "other",
+                    rag_context: str = "", thin_catalog: str = "",
+                    concept: dict = None, local_payload: dict = None,
+                    max_tokens: int = 2000) -> Optional[str]:
+        """
+        意图感知的压缩版问答（v2.5）：
+        - 按意图（concept/parameter/mixed/other）定制 system prompt
+        - 只注入 命中书/章的薄目录 + top_k 相关段落，不再全量知识目录
+        - max_tokens 2000（原 4096），显著降低响应延迟
+        """
+        system_content = WELDING_EXPERT_PROMPT
+
+        # ---- 意图化指令 ----
+        if intent in ("concept", "mixed"):
+            system_content += (
+                "\n\n## 当前问题类型：基本概念\n"
+                "请重点输出以下结构（Markdown）：\n"
+                "### 📖 概念解析\n核心定义与原理\n"
+                "### 🔧 应用及拓展\n应用场景、选型要点、常见缺陷预防\n"
+                "### ⚙️ 支持的大体工艺类型\n列出涉及的主要工艺\n"
+                "### 📚 参考基座知识库与PDF来源\n逐条标注《书名》章节\n"
+            )
+        if intent in ("parameter", "mixed"):
+            system_content += (
+                "\n\n## 当前问题类型：工艺参数\n"
+                "请重点输出以下结构（Markdown）：\n"
+                "### ⚙️ 选型参数建议\n用 Markdown 表格给出参数名/建议值（优先使用下面提供的基座参数）\n"
+                "### 🔧 应用拓展\n适用场景、工艺要点、缺陷预防\n"
+                "### 📚 应用来源\n逐条标注《书名》章节\n"
+            )
+
+        # ---- 概念条目（权威基座知识） ----
+        if concept:
+            system_content += (
+                "\n\n## 🧠 基座专家知识（概念条目，必须优先引用其内容与来源）\n"
+                f"概念：{concept.get('name','')}（别名：{', '.join(concept.get('aliases', [])[:8])}）\n"
+                f"概念解析：{concept.get('definition','')[:800]}\n"
+                f"应用及拓展：{concept.get('application','')[:600]}\n"
+                f"支持工艺类型：{'、'.join(concept.get('process_types', []))}\n"
+            )
+            srcs = concept.get("sources", [])
+            if srcs:
+                system_content += "来源：\n" + "\n".join(
+                    f"- 《{s.get('book','')}》「{s.get('chapter','')}」{s.get('page_hint','')}"
+                    for s in srcs[:6]
+                ) + "\n"
+
+        # ---- 本地已组装的参数建议（供 LLM 综合/润色） ----
+        if local_payload:
+            param_md = local_payload.get("param_md", "")
+            if param_md:
+                system_content += f"\n## 📊 本地基座参数匹配结果（可直接引用）\n{param_md[:1500]}\n"
+
+        # ---- 薄目录 + 检索上下文（不再全量） ----
+        if thin_catalog:
+            system_content += f"\n## 📚 已学习资料目录（仅命中相关）\n{thin_catalog[:1500]}\n"
+        if rag_context:
+            system_content += f"\n## 📖 检索到的相关原文\n{rag_context[:1500]}\n"
+
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_message},
+        ]
+        return self.chat(messages, max_tokens=max_tokens)
 
     def chat_sync(self, user_message: str, context: str = "", uploaded_files: list = None,
                   knowledge_catalog: str = "", cross_source_matches: list = None) -> Optional[str]:

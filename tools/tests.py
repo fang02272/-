@@ -14,7 +14,7 @@ import sys
 import io
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
@@ -55,7 +55,7 @@ def yellow(s): return f"\033[93m{s}\033[0m"
 
 def test_knowledge_integrity():
     """知识库完整性测试 — 检查每本已学习书籍的数据完整性"""
-    from knowledge_store import get_store
+    from app.knowledge_store import get_store
     store = get_store()
     sources = store.list_sources()
 
@@ -103,8 +103,8 @@ def test_knowledge_integrity():
 
 def test_keyword_matching():
     """关键词匹配测试 — 验证查询能正确匹配到预期的知识源"""
-    from welding_qa_system import WeldingQASystem
-    from knowledge_store import get_store
+    from app.welding_qa_system import WeldingQASystem
+    from app.knowledge_store import get_store
 
     store = get_store()
     qa = WeldingQASystem()
@@ -156,8 +156,8 @@ def test_keyword_matching():
 
 def test_e2e():
     """端到端测试 — 验证完整问答链路（不调LLM）"""
-    from welding_qa_system import WeldingQASystem
-    from knowledge_store import get_store
+    from app.welding_qa_system import WeldingQASystem
+    from app.knowledge_store import get_store
 
     store = get_store()
     qa = WeldingQASystem()
@@ -209,7 +209,7 @@ def test_e2e():
 
 def test_cross_source_search():
     """跨知识源搜索测试"""
-    from knowledge_store import get_store
+    from app.knowledge_store import get_store
     store = get_store()
 
     print(f"\n{'='*50}")

@@ -12,7 +12,7 @@ import io
 import os
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Use UTF-8 mode if available
@@ -24,8 +24,8 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 
 def main():
-    from knowledge_store import get_store
-    from welding_qa_system import WeldingQASystem
+    from app.knowledge_store import get_store
+    from app.welding_qa_system import WeldingQASystem
 
     store = get_store()
     sources = store.list_sources()

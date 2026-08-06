@@ -10,9 +10,8 @@
 4. 多轮对话知识补充
 """
 
-import re
-import sys
 import io
+import sys
 
 # 修复Windows控制台编码问题
 if sys.platform == 'win32':
@@ -26,8 +25,8 @@ if sys.platform == 'win32':
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
     except (ValueError, AttributeError):
         pass
-from typing import List, Dict, Tuple, Set, Optional
-from welding_knowledge_base import (
+from typing import List, Dict
+from app.welding_knowledge_base import (
     KNOWLEDGE_CATEGORIES,
     KEYWORD_CATEGORY_MAP,
     CROSS_DOMAIN_KNOWLEDGE,
@@ -67,22 +66,52 @@ class WeldingQASystem:
     # 1. 关键词提取与匹配
     # ----------------------------------------------------------------
     def extract_keywords(self, query: str) -> List[str]:
-        """从用户输入中提取焊接相关关键词（同时搜索原书+所有上传PDF）"""
+        """从用户输入中提取焊接相关关键词（同时搜索原书+所有上传PDF）。
+        v2.5：精确子串匹配 + 部分匹配（字符包含度），提高组合词命中率。"""
         found_keywords = []
         query_lower = query.lower()
+        query_chars = {c for c in query_lower if '一' <= c <= '鿿'}
 
-        # 搜索原书关键词
+        # 1. 精确子串匹配（原书）
         for keyword in self.keyword_map:
             if keyword.lower() in query_lower:
                 found_keywords.append(keyword)
 
-        # 搜索所有上传PDF的关键词
+        # 2. 部分匹配：中文关键词字符包含度 ≥70%（至少2字重合）
+        #    "热影响区冷裂纹怎么防止" → 命中"热影响区"/"冷裂纹"这类组合词
+        partial_added = 0
+        for keyword in self.keyword_map:
+            if partial_added >= 6:
+                break
+            kw = keyword.lower()
+            if kw in query_lower or kw in found_keywords:
+                continue
+            if len(kw) >= 3 and self._partial_match(kw, query_chars):
+                found_keywords.append(keyword)
+                partial_added += 1
+
+        # 3. 搜索所有上传PDF的关键词（精确 + 部分）
         for src_name, src_info in self.external_sources.items():
             for kw in src_info.get("keywords", []):
-                if kw.lower() in query_lower and kw not in found_keywords:
+                if kw in found_keywords:
+                    continue
+                kwl = kw.lower()
+                if kwl in query_lower:
                     found_keywords.append(kw)
+                elif len(kwl) >= 3 and partial_added < 10 and self._partial_match(kwl, query_chars):
+                    found_keywords.append(kw)
+                    partial_added += 1
 
         return found_keywords
+
+    @staticmethod
+    def _partial_match(keyword: str, query_chars: set) -> bool:
+        """中文关键词的字符包含度匹配（去重后字符 ≥70% 在查询中出现）"""
+        kw_chars = {c for c in keyword if '一' <= c <= '鿿'}
+        if len(kw_chars) < 2:
+            return False
+        present = sum(1 for c in kw_chars if c in query_chars)
+        return present >= 2 and present / len(kw_chars) >= 0.7
 
     def match_categories(self, keywords: List[str]) -> Dict[str, List[str]]:
         """

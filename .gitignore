@@ -1,0 +1,33 @@
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== 虚拟环境 =====
+.venv/
+.venv-gpu/
+venv/
+env/
+
+# ===== 上传的 PDF 与 OCR 缓存 =====
+uploads/*.pdf
+uploads/*_full_ocr.txt
+uploads/*_ocr_progress.json
+
+# ===== 运行时生成的知识库数据 =====
+saved_knowledge/answer_cache.json
+saved_knowledge/expert_kb.json
+saved_knowledge/vector_index/
+saved_knowledge/vector_index_test/
+*.tmp.json
+
+# ===== 原始资料 =====
+data/
+
+# ===== 日志 / 输出 =====
+*.log
+tools/*_result.txt
+
+# ===== 系统 =====
+Thumbs.db
+.DS_Store

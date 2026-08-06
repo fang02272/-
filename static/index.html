@@ -456,6 +456,12 @@ async function uploadPDF(file){
     const r=await fetch('/api/upload-pdf',{method:'POST',body:fd});
     if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'上传失败')}
     const d=await r.json();
+    // 扫描版 → GPU 后台任务，轮询状态
+    if(d.status==='processing'){
+      status.innerHTML=`<div class="upload-status">⏳ 检测到扫描版PDF，已提交 <strong>GPU</strong> 识别（约1.5秒/页），完成自动入库...</div>`;
+      pollUploadJob(d.job_id, file.name, status);
+      return;
+    }
     let h=`<div class="upload-status ok">✅ 解析成功！已加入知识库，AI回答时将自动引用</div>`;
     h+=`<div style="margin-top:12px;padding:12px;background:var(--surface-secondary);border-radius:8px;font-size:13px;line-height:1.7">`;
     h+=`<strong>📄 ${esc(d.filename)}</strong><br>`;
@@ -478,6 +484,37 @@ async function uploadPDF(file){
   }catch(e){
     status.innerHTML=`<div class="upload-status err">❌ ${esc(e.message)}</div>`;
   }
+}
+
+// GPU 入库任务轮询（扫描版上传后）
+function pollUploadJob(jobId, filename, status){
+  const poll=async()=>{
+    try{
+      const r=await fetch('/api/upload-status/'+jobId);
+      const d=await r.json();
+      if(d.status==='done'){
+        let h=`<div class="upload-status ok">✅ GPU识别完成！已自动加入知识库，AI回答时将引用</div>`;
+        h+=`<div style="margin-top:8px;padding:10px;background:var(--surface-secondary);border-radius:8px;font-size:12px;line-height:1.6;white-space:pre-wrap;max-height:200px;overflow:auto">${esc(d.message||d.detail||'')}</div>`;
+        status.innerHTML=h;
+        toast('GPU识别完成，已加入知识库');
+        loadUploadedFiles();checkLLMStatus();
+        return;
+      }
+      if(d.status==='error'){
+        status.innerHTML=`<div class="upload-status err">❌ ${esc(d.message||'GPU处理失败')}</div>`;
+        if(d.detail)status.innerHTML+=`<pre style="font-size:11px;max-height:150px;overflow:auto;margin-top:6px;background:var(--surface-secondary);padding:8px;border-radius:6px;white-space:pre-wrap">${esc(d.detail)}</pre>`;
+        return;
+      }
+      // 处理中：显示进度
+      let prog='';
+      if(d.pages_total){prog=`（${d.pages_done||0}/${d.pages_total}页）`;}
+      status.innerHTML=`<div class="upload-status">⏳ GPU识别中${prog}... <span style="font-size:11px;color:var(--text-tertiary)">已完成可自动入库</span></div>`;
+      setTimeout(poll,3000);
+    }catch(e){
+      setTimeout(poll,5000);
+    }
+  };
+  poll();
 }
 
 async function loadUploadedFiles(){
@@ -562,6 +599,96 @@ function appendErr(m){
 /* ============================================================
    Render Expert Card
    ============================================================ */
+/* ============================================================
+   工艺卡片渲染（机器人/仿真用，机器可读 JSON）
+   ============================================================ */
+function renderProcessCard(c){
+  if(!c||!c.process)return '';
+  const escH=esc;
+  const rp=c.robot_params||{}, el=c.electrical||{}, th=c.thermal||{},
+        jp=c.joint_prep||{}, pp=c.pass_plan||{}, qc=c.quality||{};
+  let h='';
+  // 基本信息条
+  h+=`<div style="display:flex;flex-wrap:wrap;gap:6px;padding:12px;background:var(--primary-light);border-radius:10px;margin-bottom:14px">`;
+  h+=`<span style="background:#fff;padding:4px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)">🧱 母材 <b>${escH(c.base_material||'')}</b></span>`;
+  h+=`<span style="background:#fff;padding:4px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)">📏 板厚 <b>${escH(c.thickness_mm==null?'':c.thickness_mm)}mm</b></span>`;
+  h+=`<span style="background:#fff;padding:4px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)">🔥 工艺 <b>${escH(c.process)}</b></span>`;
+  if(c.process_assumed)h+=`<span style="padding:4px 10px;border-radius:20px;font-size:11px;background:var(--warning-bg);color:var(--warning)">⚠️ 工艺未指定，默认焊条电弧焊</span>`;
+  h+='</div>';
+
+  // 机器人装备
+  const eq=c.equipment||{};
+  if(eq.robot_model||eq.welder_model){
+    h+=`<div style="display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px;background:var(--surface-tertiary);border-radius:8px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)">`;
+    h+=`<span>🤖 机器人 <b>${escH(eq.robot_model||'')}</b></span>`;
+    h+=`<span>🔥 焊枪 <b>${escH(eq.torch_model||'')}</b></span>`;
+    h+=`<span>🔌 焊机 <b>${escH(eq.welder_model||'')}</b></span>`;
+    if(eq.work_area_m2)h+=`<span>📐 作业幅宽 <b>${escH(eq.work_area_m2)}㎡</b></span>`;
+    h+='</div>';
+  }
+
+  // 机器人参数（高亮，供路径规划）
+  h+=`<h3 style="margin-top:14px">🤖 机器人参数</h3>`;
+  h+=`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px">`;
+  const rpCells=[
+    ['焊接速度',rp.travel_speed],['焊枪倾角',rp.gun_angle],['干伸长',rp.stick_out],
+    ['摆动宽度',rp.weave_width],['摆动频率',rp.weave_frequency],['摆动脉冲',rp.weave_dwell]];
+  rpCells.forEach(([k,v])=>{ if(v)h+=`<div style="background:var(--surface-tertiary);padding:8px 10px;border-radius:8px;font-size:12px"><div style="color:var(--text-tertiary);font-size:11px">${k}</div><b>${escH(v)}</b></div>`; });
+  h+='</div>';
+
+  // 焊接参数表
+  h+=`<h3 style="margin-top:16px">⚙️ 焊接参数</h3>`;
+  h+=`<div class="md-table-wrap"><table><thead><tr><th>参数</th><th>建议值</th></tr></thead><tbody>`;
+  const elRows=[['焊接电流',el.current_a],['电弧电压',el.voltage_v],['焊接速度',el.travel_speed_cm_min],
+    ['焊材',c.consumables],['焊条/焊丝直径',c.electrode_diameter],['保护气体',c.shielding_gas]];
+  elRows.forEach(([k,v])=>{ if(v)h+=`<tr><td>${k}</td><td>${escH(v)}</td></tr>`; });
+  h+='</tbody></table></div>';
+
+  // 工艺方案（坡口/装配/清理/定位焊/焊道）
+  h+=`<h3 style="margin-top:16px">📋 工艺方案</h3>`;
+  h+=`<div style="background:var(--surface-secondary);padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.8">`;
+  h+=`<div>🔪 坡口：${escH(c.groove)}</div>`;
+  h+=`<div>↔️ 装配间隙：${escH(c.joint_gap_mm)}</div>`;
+  h+=`<div>🧼 清理：${escH(jp.cleaning)}</div>`;
+  h+=`<div>📍 定位焊：${escH(jp.tack_weld)}</div>`;
+  h+=`<div>🗂 层道：${escH(pp.layers_passes)}</div>`;
+  h+=`<div>〰️ 摆动：${escH(pp.weaving)}</div>`;
+  h+=`</div>`;
+
+  // 热管理
+  h+=`<h3 style="margin-top:16px">🌡️ 热管理</h3>`;
+  h+=`<div style="background:var(--surface-secondary);padding:10px 14px;border-radius:8px;font-size:13px;line-height:1.8">`;
+  h+=`<div>预热：${escH(th.preheat)}</div><div>层间温度：${escH(th.interpass_temp)}</div><div>后热：${escH(th.postheat)}</div>`;
+  h+='</div>';
+
+  // 质量评估（缺陷预防）
+  h+=`<h3 style="margin-top:16px">🛡️ 质量评估（缺陷预防）</h3>`;
+  h+=`<div class="md-table-wrap"><table><thead><tr><th>常见缺陷</th><th>产生原因</th><th>预防措施</th></tr></thead><tbody>`;
+  (qc.checks||[]).forEach(cd=>{ h+=`<tr><td>${escH(cd.defect||'')}</td><td>${escH(cd.cause||'')}</td><td>${escH(cd.prevention||'')}</td></tr>`; });
+  h+='</tbody></table></div>';
+  h+=`<p style="font-size:12px;color:var(--text-tertiary)">🔍 检验要点：${escH(qc.inspection||'')}</p>`;
+
+  // 应用来源
+  if(c.application)h+=`<p style="font-size:12px;color:var(--text-secondary);margin-top:10px">💡 ${escH(c.application)}</p>`;
+
+  // JSON 导出（仿真/机器人导入）
+  h+=`<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">`;
+  h+=`<button class="topbar-btn" onclick="copyProcessCard(this)" data-json="${escH(JSON.stringify(c)).replace(/"/g,'&quot;')}">📋 复制JSON（仿真/机器人导入）</button>`;
+  h+=`<button class="topbar-btn" onclick="toggleProcessJson(this)">🔍 查看JSON</button>`;
+  h+='</div>';
+  h+=`<pre id="proc-json-${(Math.random()*1e6|0)}" style="display:none;font-size:11px;max-height:260px;overflow:auto;background:#1E293B;color:#E2E8F0;padding:12px;border-radius:8px;margin-top:10px;white-space:pre-wrap">${escH(JSON.stringify(c,null,2))}</pre>`;
+  return h;
+}
+function copyProcessCard(btn){
+  try{
+    navigator.clipboard.writeText(btn.dataset.json).then(()=>toast('✅ 工艺卡片JSON已复制到剪贴板（仿真/机器人可导入）'));
+  }catch(e){ toast('复制失败，请手动复制JSON'); }
+}
+function toggleProcessJson(btn){
+  const pre=btn.parentElement.nextElementSibling;
+  if(pre)pre.style.display=pre.style.display==='none'?'block':'none';
+}
+
 function appendExpertCard(d){
   const el=document.createElement('div');
   el.className='msg bot';
@@ -576,7 +703,10 @@ function appendExpertCard(d){
   // Build content
   let bodyHTML='';
 
-  if(d.content&&d.content.length>50){
+  if(d.process_card){
+    // 工艺卡片（机器可读，隐藏推理）
+    bodyHTML=renderProcessCard(d.process_card);
+  }else if(d.content&&d.content.length>50){
     // LLM-generated markdown content
     let md=d.content;
     // Escape HTML first, let marked.js handle markdown
@@ -625,15 +755,24 @@ function appendExpertCard(d){
     }
   }
 
+  // v2.5 路由徽标 + 模型标签
+  const intentMap={concept:['📖','概念'],parameter:['⚙️','工艺参数'],mixed:['🔀','综合'],other:['🌐','通用']};
+  const rI=(d.route&&d.route.intent)||'other';
+  const [rIcon,rLabel]=intentMap[rI]||intentMap.other;
+  const modelLabel=({local_expert:'本地专家',cache:'缓存命中',local_knowledge_base:'本地知识库'})[d.model_used]||(d.model_used||'AI');
+
   el.innerHTML=`
     <div class="msg-avatar">🔬</div>
     <div class="msg-content" style="max-width:100%">
       <div class="expert-card">
         <div class="card-header">
           <div class="card-header-left">
-            <span class="exp">🔍 AI焊接工艺专家</span>${tags}
+            <span class="exp">🔍 AI焊接工艺专家</span>
+            <span class="kw" style="background:var(--purple-bg);color:var(--purple)">${rIcon} ${rLabel}</span>
+            ${d.confidence?`<span class="kw" title="本地匹配置信度">${(d.confidence*100).toFixed(0)}%</span>`:''}
+            ${tags}
           </div>
-          <span class="card-model">${esc(d.model_used||'')} · ${(d.elapsed_ms||0).toFixed(0)}ms</span>
+          <span class="card-model">${esc(modelLabel)} · ${(d.elapsed_ms||0).toFixed(0)}ms</span>
         </div>
         <div class="card-body">${bodyHTML}${refHTML}</div>
       </div>
