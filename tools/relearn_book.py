@@ -4,11 +4,13 @@
 - 验证: 章节拆分 / 关键词(含E4303等型号) / 焊接参数提取
 """
 import sys
+import os
 import io
 import json
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+os.chdir(str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(PROJECT_ROOT))
 from app.knowledge_store import KnowledgeStore
 

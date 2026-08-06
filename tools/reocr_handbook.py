@@ -12,10 +12,12 @@ GPU 重跑《实用焊接工艺手册》第二版 OCR
 """
 
 import sys
+import os
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+os.chdir(str(Path(__file__).resolve().parent.parent))
 
 import fitz
 from app.pdf_parser import PDFParser

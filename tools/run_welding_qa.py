@@ -9,10 +9,12 @@
 """
 
 import sys
+import os
 import io
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+os.chdir(str(Path(__file__).resolve().parent.parent))
 
 if sys.platform == 'win32':
     for _s in (sys.stdout, sys.stderr):

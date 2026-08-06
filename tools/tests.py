@@ -11,10 +11,12 @@
 """
 
 import sys
+import os
 import io
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+os.chdir(str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 if sys.platform == 'win32' and hasattr(sys.stdout, 'reconfigure'):
