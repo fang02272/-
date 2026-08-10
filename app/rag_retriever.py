@@ -20,16 +20,37 @@ class SimpleRetriever:
         self.doc_freq: Dict[str, int] = defaultdict(int)  # 词 → 出现文档数
         self.term_index: Dict[str, List[int]] = defaultdict(list)  # 词 → 文档ID列表
         self.doc_count = 0
+        # 融合 git jieba 分支：注册焊接术语，防专业词被错误拆分
+        try:
+            import jieba
+            self._tokenizer = jieba.Tokenizer()
+            from app.welding_knowledge_base import KEYWORD_CATEGORY_MAP
+            for term in KEYWORD_CATEGORY_MAP:
+                if len(str(term)) >= 2:
+                    try:
+                        self._tokenizer.add_word(str(term))
+                    except Exception:
+                        pass
+        except Exception:
+            self._tokenizer = None
 
     def _tokenize(self, text: str) -> List[str]:
-        """中文+英文混合分词"""
+        """中文+英文混合分词（jieba 词级 + bigram 兜底）"""
         tokens = []
-        # 中文：按字符切分后做2-gram
+        # jieba 词级（优先）
+        if self._tokenizer is not None:
+            try:
+                for w in self._tokenizer.lcut(text):
+                    w = w.strip().lower()
+                    if not w:
+                        continue
+                    if re.fullmatch(r'[一-鿿]{2,}', w) or re.fullmatch(r'[a-z0-9]{2,}', w):
+                        tokens.append(w)
+            except Exception:
+                pass
+        # bigram 兜底（未登录词重叠特征）
         chinese = re.findall(r'[一-鿿]+', text)
         for seg in chinese:
-            # unigram
-            tokens.extend(list(seg))
-            # bigram
             for i in range(len(seg) - 1):
                 tokens.append(seg[i:i+2])
         # 英文/数字词

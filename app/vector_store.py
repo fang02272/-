@@ -49,8 +49,31 @@ _EN_RE = re.compile(r'[a-zA-Z0-9]+')
 _CN_RE = re.compile(r'[一-鿿]+')
 
 
+# jieba 分词器（融合 git jieba 分支：注册焊接术语防误切 + 词级特征）
+_jieba = None
+
+
+def _get_jieba():
+    """懒加载 jieba.Tokenizer，并把焊接领域术语注册进去（避免专业词被错误拆分）"""
+    global _jieba
+    if _jieba is None:
+        import jieba
+        _jieba = jieba.Tokenizer()
+        for term in _DOMAIN_TERMS:
+            try:
+                _jieba.add_word(term)
+            except Exception:
+                pass
+        for alias in _ALIAS_REVERSE:
+            try:
+                _jieba.add_word(alias)
+            except Exception:
+                pass
+    return _jieba
+
+
 def tokenize(text: str) -> List[str]:
-    """文本 → 加权 token 流（保留重复，用于频次加权）"""
+    """文本 → 加权 token 流（jieba 词级 + 领域术语 + 型号，保留重复用于频次加权）"""
     if not text:
         return []
     text = text.lower()
@@ -66,14 +89,23 @@ def tokenize(text: str) -> List[str]:
     # 3. 型号/钢号/牌号（大写去空格，加权×2）
     for m in _MODEL_RE.findall(text):
         tokens.extend([f"M:{m.upper().replace(' ', '')}"] * 2)
-    # 4. 中文汉字 bigram（×1）
+    # 4. jieba 词级特征（融合 jieba 分支，替代纯 bigram，专业词已注册不会被拆分）
+    try:
+        for w in _get_jieba().lcut(text):
+            w = w.strip().lower()
+            if not w:
+                continue
+            if _CN_RE.fullmatch(w) and len(w) >= 2:
+                tokens.append(f"W:{w}")
+            elif re.fullmatch(r'[a-z0-9]{2,}', w):
+                tokens.append(f"W:{w}")
+    except Exception:
+        pass
+    # 5. 中文 bigram 兜底（×1，保证未登录词仍有重叠特征）
     for seg in _CN_RE.findall(text):
         for i in range(len(seg) - 1):
             tokens.append(f"B:{seg[i:i + 2]}")
-        # 单字也保留（1字词/数字中文字符串如"铸铁"）
-        if len(seg) == 1:
-            tokens.append(f"B:{seg}")
-    # 5. 英文/数字词（×1）
+    # 6. 英文/数字词兜底
     for w in _EN_RE.findall(text):
         if not w.isdigit() or len(w) >= 3:
             tokens.append(f"W:{w}")
