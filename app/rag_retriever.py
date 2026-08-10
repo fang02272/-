@@ -20,27 +20,34 @@ class SimpleRetriever:
         self.doc_freq: Dict[str, int] = defaultdict(int)  # 词 → 出现文档数
         self.term_index: Dict[str, List[int]] = defaultdict(list)  # 词 → 文档ID列表
         self.doc_count = 0
-        # 融合 git jieba 分支：注册焊接术语，防专业词被错误拆分
+        # 融合 git jieba 分支：术语高频注册，防专业词被错误拆分
         try:
             import jieba
             self._tokenizer = jieba.Tokenizer()
-            from app.welding_knowledge_base import KEYWORD_CATEGORY_MAP
+            from app.welding_knowledge_base import KEYWORD_CATEGORY_MAP, TERM_ALIAS_MAP
             for term in KEYWORD_CATEGORY_MAP:
                 if len(str(term)) >= 2:
                     try:
-                        self._tokenizer.add_word(str(term))
+                        self._tokenizer.add_word(str(term), freq=50000)
                     except Exception:
                         pass
+            for aliases in TERM_ALIAS_MAP.values():
+                for a in aliases:
+                    if len(str(a)) >= 2:
+                        try:
+                            self._tokenizer.add_word(str(a), freq=30000)
+                        except Exception:
+                            pass
         except Exception:
             self._tokenizer = None
 
     def _tokenize(self, text: str) -> List[str]:
-        """中文+英文混合分词（jieba 词级 + bigram 兜底）"""
+        """中文+英文混合分词（jieba 搜索模式多粒度 + bigram 兜底）"""
         tokens = []
-        # jieba 词级（优先）
+        # jieba 搜索模式（多粒度，提升召回）
         if self._tokenizer is not None:
             try:
-                for w in self._tokenizer.lcut(text):
+                for w in self._tokenizer.cut_for_search(text):
                     w = w.strip().lower()
                     if not w:
                         continue
