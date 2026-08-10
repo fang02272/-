@@ -6,6 +6,8 @@
   python tests.py --match      # 仅关键词匹配测试
   python tests.py --knowledge  # 仅知识库完整性测试
   python tests.py --e2e        # 仅端到端测试
+  python tests.py --tokenize   # 仅Jieba分词与检索测试
+  python tests.py --rag-rebuild # 仅持久化知识库RAG重建测试
 
 所有测试不调用大模型API，纯本地验证
 """
@@ -53,6 +55,132 @@ E2E_TESTS = [
 def green(s): return f"\033[92m{s}\033[0m"
 def red(s): return f"\033[91m{s}\033[0m"
 def yellow(s): return f"\033[93m{s}\033[0m"
+
+
+def test_jieba_tokenization():
+    """Jieba分词测试 — 验证专业词保留且不产生机械双字噪声"""
+    from rag_retriever import SimpleRetriever
+
+    retriever = SimpleRetriever()
+    tokens = retriever._tokenize("Q345钢板预热温度")
+
+    expected_terms = ["q345", "钢板", "预热", "温度"]
+    forbidden_terms = ["板预", "热温"]
+    checks = [
+        *[(f"保留专业词: {term}", term in tokens) for term in expected_terms],
+        *[(f"不产生机械双字: {term}", term not in tokens) for term in forbidden_terms],
+    ]
+
+    retriever.add_document(
+        "relevant",
+        "Q345钢板厚度超过25mm时，应根据碳当量和拘束度确定预热温度。",
+        "test",
+    )
+    retriever.add_document(
+        "unrelated",
+        "弧焊机器人需要进行轨迹规划、焊缝跟踪和运动速度控制。",
+        "test",
+    )
+    results = retriever.search("Q345钢板预热温度", top_k=2)
+    checks.append(("相关文档排在首位", bool(results) and results[0]["id"] == "relevant"))
+
+    print(f"\n{'='*50}")
+    print("✂️ Jieba分词与检索测试")
+    print(f"{'='*50}")
+    print(f"\n  输入: {yellow('Q345钢板预热温度')}")
+    print(f"  分词: {', '.join(tokens)}")
+
+    passed = 0
+    failed = 0
+    for desc, ok in checks:
+        status = green("✓") if ok else red("✗")
+        print(f"    {status} {desc}")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}通过, {failed}失败")
+    return failed == 0
+
+
+def test_rag_rebuild_from_saved_knowledge():
+    """验证 saved_knowledge 可完整重建，且重复重建不会产生重复分块。"""
+    from tempfile import TemporaryDirectory
+    from knowledge_store import KnowledgeStore
+    from rag_retriever import RAGContextBuilder
+
+    with TemporaryDirectory() as temp_dir:
+        store = KnowledgeStore(temp_dir)
+        test_text = (
+            "第1章 Q999试验钢焊接工艺\n"
+            + "Q999试验钢在高拘束条件下应采用180℃预热温度，并控制层间温度。\n" * 120
+        )
+        source_id = store.learn_book(
+            filename="Q999焊接手册.pdf",
+            full_text=test_text,
+            tables=[],
+            page_count=5,
+            images=[],
+        )
+
+        rag = RAGContextBuilder()
+        built_in_count = rag.retriever.doc_count
+        first_stats = rag.rebuild_from_store(store)
+        first_pdf_docs = [
+            doc for doc in rag.retriever.documents
+            if doc["source"] == "pdf_upload"
+        ]
+        search_results = rag.retriever.search("Q999预热温度", top_k=5)
+
+        second_stats = rag.rebuild_from_store(store)
+        second_pdf_docs = [
+            doc for doc in rag.retriever.documents
+            if doc["source"] == "pdf_upload"
+        ]
+
+        checks = [
+            ("识别到1个持久化知识源", first_stats["sources"] == 1),
+            ("成功索引1个知识源", first_stats["indexed_sources"] == 1),
+            ("生成至少1个PDF分块", first_stats["chunks"] > 0),
+            ("索引过程无错误", not first_stats["errors"]),
+            ("保留内置知识索引", rag.retriever.doc_count == built_in_count + second_stats["chunks"]),
+            ("重复重建不增加分块", len(second_pdf_docs) == len(first_pdf_docs)),
+            ("分块ID不重复", len({doc["id"] for doc in second_pdf_docs}) == len(second_pdf_docs)),
+            ("分块保留真实书名", all("Q999焊接手册.pdf" in doc["text"] for doc in second_pdf_docs)),
+            ("查询能命中重建后的知识源", any(source_id in item["id"] for item in search_results)),
+            ("可按文件名定位知识源", store.get_source_by_filename("Q999焊接手册.pdf")["id"] == source_id),
+        ]
+
+        store.unregister(source_id)
+        empty_stats = rag.rebuild_from_store(store)
+        checks.extend([
+            ("删除后持久化知识源为空", empty_stats["sources"] == 0),
+            ("删除后外部RAG分块被清除", not any(
+                doc["source"] == "pdf_upload" for doc in rag.retriever.documents
+            )),
+        ])
+
+    print(f"\n{'='*50}")
+    print("♻️ saved_knowledge RAG重建测试")
+    print(f"{'='*50}")
+    print(
+        f"\n  首次重建: {first_stats['indexed_sources']}个知识源, "
+        f"{first_stats['chapters']}个章节, {first_stats['chunks']}个分块"
+    )
+
+    passed = 0
+    failed = 0
+    for desc, ok in checks:
+        status = green("✓") if ok else red("✗")
+        print(f"    {status} {desc}")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}通过, {failed}失败")
+    return failed == 0
 
 
 def test_knowledge_integrity():
@@ -289,6 +417,12 @@ def test_jieba_tokenization():
 if __name__ == "__main__":
     run_all = len(sys.argv) == 1
     results = {}
+
+    if run_all or "--tokenize" in sys.argv:
+        results['tokenization'] = test_jieba_tokenization()
+
+    if run_all or "--rag-rebuild" in sys.argv:
+        results['rag_rebuild'] = test_rag_rebuild_from_saved_knowledge()
 
     if run_all or "--knowledge" in sys.argv:
         results['knowledge'] = test_knowledge_integrity()
