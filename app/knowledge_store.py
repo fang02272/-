@@ -122,6 +122,15 @@ class KnowledgeStore:
                 "summary": summary,
             })
 
+        # Step 3.5: 表格关键词 — 表格含大量工艺参数/牌号词，并入全书关键词
+        # （参考 relearn_tables 思路：恢复表格 → 关键词解析率提升）
+        table_text = "\n".join(
+            t.get("markdown", "") for t in tables if isinstance(t, dict) and "markdown" in t
+        )
+        if table_text.strip():
+            table_kws = self._extract_keywords(table_text) - self._GENERIC_WORDS
+            all_keywords.update(table_kws)
+
         # Step 4: 提取全书的焊接参数数据
         data_points = self._extract_welding_params(full_text)
 
