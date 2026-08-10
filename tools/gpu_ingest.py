@@ -66,12 +66,21 @@ def main():
     if parsed.get("warning"):
         print(f"   ⚠️ {parsed['warning'][:120]}")
 
+    # ---- 1.5) 扫描版 → 自动重建表格（定向OCR候选页，恢复结构化数据）----
+    tables = parsed["tables"]
+    if parsed.get("is_scanned") or (parsed["text_length"] > 0 and not tables):
+        print("   🔧 扫描版，自动重建表格（定向OCR候选页）...")
+        tables = parser.reconstruct_tables(
+            str(pdf_path),
+            PROJECT_ROOT / "uploads" / f"{Path(name).stem}_full_ocr.txt")
+        print(f"   ✅ 表格重建: {len(tables)} 个")
+
     # ---- 2) 学习入库（自动替换同名旧书） ----
     store = get_store()
     source_id = store.learn_book(
         filename=name,
         full_text=parsed["full_text"],
-        tables=parsed["tables"],
+        tables=tables,
         page_count=parsed["page_count"],
         images=parsed["images"],
     )

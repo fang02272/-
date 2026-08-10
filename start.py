@@ -66,17 +66,25 @@ def auto_learn_uploads():
             try:
                 print(f"      ⏳ {pdf_path.name}...")
                 parsed = parser.parse(str(pdf_path))
+                tables = parsed["tables"]
+                # 扫描版 → 自动重建表格（定向OCR候选页）
+                if parsed.get("is_scanned") or (parsed["text_length"] > 0 and not tables):
+                    print(f"         🔧 扫描版，重建表格...")
+                    tables = parser.reconstruct_tables(
+                        str(pdf_path),
+                        PROJECT_ROOT / "uploads" / f"{Path(pdf_path.name).stem}_full_ocr.txt")
                 store.learn_book(
                     filename=pdf_path.name,
                     full_text=parsed["full_text"],
-                    tables=parsed["tables"],
+                    tables=tables,
                     page_count=parsed["page_count"],
                     images=parsed["images"],
                 )
                 src = store.get_source(pdf_path.name.replace('.pdf', '')[:40])
                 ch = src.get("chapter_count", 0) if src else 0
                 kw = src.get("keyword_count", 0) if src else 0
-                print(f"      ✅ {pdf_path.name} — {ch}章, {kw}关键词, {parsed['text_length']}字")
+                tb = src.get("table_count", 0) if src else 0
+                print(f"      ✅ {pdf_path.name} — {ch}章, {kw}关键词, {tb}表格, {parsed['text_length']}字")
             except Exception as e:
                 print(f"      ❌ {pdf_path.name} — {e}")
 
