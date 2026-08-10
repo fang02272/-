@@ -54,26 +54,35 @@ _jieba = None
 
 
 def _get_jieba():
-    """懒加载 jieba.Tokenizer，并把焊接领域术语注册进去（避免专业词被错误拆分）"""
+    """懒加载 jieba.Tokenizer，焊接术语高频注册（freq 高 → 不被错误拆分）"""
     global _jieba
     if _jieba is None:
         import jieba
         _jieba = jieba.Tokenizer()
+        # 术语高频注册：freq 大 → jieba 倾向保留整词
         for term in _DOMAIN_TERMS:
             try:
-                _jieba.add_word(term)
+                _jieba.add_word(term, freq=50000)
             except Exception:
                 pass
         for alias in _ALIAS_REVERSE:
             try:
-                _jieba.add_word(alias)
+                _jieba.add_word(alias, freq=30000)
             except Exception:
                 pass
     return _jieba
 
 
+def _jieba_cut(text: str) -> list:
+    """jieba 搜索模式分词：多粒度切分提升召回（保留完整专业词 + 子词）"""
+    try:
+        return _get_jieba().cut_for_search(text)
+    except Exception:
+        return []
+
+
 def tokenize(text: str) -> List[str]:
-    """文本 → 加权 token 流（jieba 词级 + 领域术语 + 型号，保留重复用于频次加权）"""
+    """文本 → 加权 token 流（jieba 多粒度 + 领域术语 + 型号，保留重复用于频次加权）"""
     if not text:
         return []
     text = text.lower()
@@ -89,18 +98,15 @@ def tokenize(text: str) -> List[str]:
     # 3. 型号/钢号/牌号（大写去空格，加权×2）
     for m in _MODEL_RE.findall(text):
         tokens.extend([f"M:{m.upper().replace(' ', '')}"] * 2)
-    # 4. jieba 词级特征（融合 jieba 分支，替代纯 bigram，专业词已注册不会被拆分）
-    try:
-        for w in _get_jieba().lcut(text):
-            w = w.strip().lower()
-            if not w:
-                continue
-            if _CN_RE.fullmatch(w) and len(w) >= 2:
-                tokens.append(f"W:{w}")
-            elif re.fullmatch(r'[a-z0-9]{2,}', w):
-                tokens.append(f"W:{w}")
-    except Exception:
-        pass
+    # 4. jieba 搜索模式多粒度词（融合 jieba 分支，专业词已注册不会被拆散）
+    for w in _jieba_cut(text):
+        w = w.strip().lower()
+        if not w:
+            continue
+        if _CN_RE.fullmatch(w) and len(w) >= 2:
+            tokens.append(f"W:{w}")
+        elif re.fullmatch(r'[a-z0-9]{2,}', w):
+            tokens.append(f"W:{w}")
     # 5. 中文 bigram 兜底（×1，保证未登录词仍有重叠特征）
     for seg in _CN_RE.findall(text):
         for i in range(len(seg) - 1):
