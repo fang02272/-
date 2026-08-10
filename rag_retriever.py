@@ -185,21 +185,93 @@ class RAGContextBuilder:
         except ImportError:
             pass
 
-    def add_pdf_document(self, filename: str, text: str):
-        """添加上传PDF的文本到索引"""
+    def add_pdf_document(self, filename: str, text: str, context_header: str = "") -> int:
+        """添加上传PDF文本到索引，返回实际加入的分块数量。"""
         # 分块索引
         chunk_size = 800
         chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        indexed_count = 0
         for i, chunk in enumerate(chunks):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            indexed_text = f"{context_header}\n{chunk}" if context_header else chunk
             self.retriever.add_document(
                 f"pdf_{filename}_chunk{i}",
-                chunk.strip(),
+                indexed_text,
                 "pdf_upload"
             )
+            indexed_count += 1
+        return indexed_count
 
     def remove_pdf_documents(self):
         """移除所有PDF上传文档"""
         self.retriever.clear_external()
+
+    def rebuild_from_store(self, store=None) -> dict:
+        """
+        从 saved_knowledge 对应的 KnowledgeStore 完整重建外部 RAG 索引。
+
+        每个知识源优先按章节全文索引；没有有效章节时回退到 full_text.txt。
+        重建前会清除旧的 PDF 分块，因此重复调用不会产生重复索引。
+        """
+        if store is None:
+            from knowledge_store import get_store
+            store = get_store()
+
+        self.remove_pdf_documents()
+
+        stats = {
+            "sources": 0,
+            "indexed_sources": 0,
+            "chapters": 0,
+            "chunks": 0,
+            "errors": [],
+        }
+
+        for source in store.list_sources():
+            stats["sources"] += 1
+            source_id = source.get("id", "")
+            source_name = source.get("filename", source_id or "未知资料")
+            source_chunks = 0
+
+            try:
+                chapters = store.get_chapters(source_id)
+                for chapter_index, chapter in enumerate(chapters):
+                    content = str(chapter.get("content", "")).strip()
+                    if not content:
+                        continue
+
+                    chapter_title = chapter.get("title", f"第{chapter_index + 1}部分")
+                    header = f"【来源：《{source_name}》】\n【章节：{chapter_title}】"
+                    source_chunks += self.add_pdf_document(
+                        f"{source_id}_chapter_{chapter_index}",
+                        content,
+                        context_header=header,
+                    )
+                    stats["chapters"] += 1
+
+                # 某些旧知识源可能只有 full_text.txt，没有可用的章节内容。
+                if source_chunks == 0:
+                    full_text = store.get_full_text(source_id).strip()
+                    if full_text:
+                        source_chunks += self.add_pdf_document(
+                            f"{source_id}_full_text",
+                            full_text,
+                            context_header=f"【来源：《{source_name}》】",
+                        )
+
+                if source_chunks > 0:
+                    stats["indexed_sources"] += 1
+                    stats["chunks"] += source_chunks
+            except Exception as exc:
+                stats["errors"].append({
+                    "source_id": source_id,
+                    "source": source_name,
+                    "error": str(exc),
+                })
+
+        return stats
 
     def build_context(self, query: str, top_k: int = 10) -> str:
         """

@@ -421,6 +421,17 @@ class KnowledgeStore:
                 return s
         return None
 
+    def get_source_by_filename(self, filename: str) -> Optional[dict]:
+        """按上传文件名查找知识源，同时兼容旧数据中的规范化ID。"""
+        normalized_id = self._make_id(filename)
+        filename_key = filename.casefold()
+        for source in self.registry["sources"]:
+            if str(source.get("filename", "")).casefold() == filename_key:
+                return source
+            if source.get("id") == normalized_id:
+                return source
+        return None
+
     def list_sources(self) -> List[dict]:
         return self.registry["sources"]
 
