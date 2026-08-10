@@ -236,6 +236,53 @@ def test_cross_source_search():
     return True
 
 
+def test_jieba_tokenization():
+    """Jieba分词测试（融合 origin/main 分支）— 验证专业词保留且不产生机械双字"""
+    from app.rag_retriever import SimpleRetriever
+
+    retriever = SimpleRetriever()
+    tokens = retriever._tokenize("Q345钢板预热温度")
+
+    expected_terms = ["q345", "钢板", "预热", "温度"]
+    forbidden_terms = ["板预", "热温"]
+    checks = [
+        *[(f"保留专业词: {term}", term in tokens) for term in expected_terms],
+        *[(f"不产生机械双字: {term}", term not in tokens) for term in forbidden_terms],
+    ]
+
+    retriever.add_document(
+        "relevant",
+        "Q345钢板厚度超过25mm时，应根据碳当量和拘束度确定预热温度。",
+        "test",
+    )
+    retriever.add_document(
+        "unrelated",
+        "弧焊机器人需要进行轨迹规划、焊缝跟踪和运动速度控制。",
+        "test",
+    )
+    results = retriever.search("Q345钢板预热温度", top_k=2)
+    checks.append(("相关文档排在首位", bool(results) and results[0]["id"] == "relevant"))
+
+    print(f"\n{'='*50}")
+    print("✂️ Jieba分词与检索测试")
+    print(f"{'='*50}")
+    print(f"\n  输入: {yellow('Q345钢板预热温度')}")
+    print(f"  分词: {', '.join(tokens)}")
+
+    passed = 0
+    failed = 0
+    for desc, ok in checks:
+        status = green("✓") if ok else red("✗")
+        print(f"    {status} {desc}")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}通过, {failed}失败")
+    return failed == 0
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -254,6 +301,9 @@ if __name__ == "__main__":
 
     if run_all or "--e2e" in sys.argv:
         results['e2e'] = test_e2e()
+
+    if run_all or "--tokenize" in sys.argv:
+        results['tokenization'] = test_jieba_tokenization()
 
     # Summary
     print(f"\n{'='*50}")

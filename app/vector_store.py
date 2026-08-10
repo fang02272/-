@@ -98,7 +98,7 @@ def tokenize(text: str) -> List[str]:
     # 3. 型号/钢号/牌号（大写去空格，加权×2）
     for m in _MODEL_RE.findall(text):
         tokens.extend([f"M:{m.upper().replace(' ', '')}"] * 2)
-    # 4. jieba 搜索模式多粒度词（融合 jieba 分支，专业词已注册不会被拆散）
+    # 4. jieba 搜索模式多粒度词（融合 git jieba 分支：jieba 替换 n-gram，专业词已注册不会被拆散）
     for w in _jieba_cut(text):
         w = w.strip().lower()
         if not w:
@@ -107,11 +107,7 @@ def tokenize(text: str) -> List[str]:
             tokens.append(f"W:{w}")
         elif re.fullmatch(r'[a-z0-9]{2,}', w):
             tokens.append(f"W:{w}")
-    # 5. 中文 bigram 兜底（×1，保证未登录词仍有重叠特征）
-    for seg in _CN_RE.findall(text):
-        for i in range(len(seg) - 1):
-            tokens.append(f"B:{seg[i:i + 2]}")
-    # 6. 英文/数字词兜底
+    # 5. 英文/数字词兜底（保持英文检索，不产生中文机械双字）
     for w in _EN_RE.findall(text):
         if not w.isdigit() or len(w) >= 3:
             tokens.append(f"W:{w}")
