@@ -44,7 +44,7 @@ class SimpleRetriever:
     def _tokenize(self, text: str) -> List[str]:
         """中文+英文混合分词（jieba 搜索模式多粒度 + bigram 兜底）"""
         tokens = []
-        # jieba 搜索模式（多粒度，提升召回）
+        # jieba 搜索模式（多粒度，提升召回；jieba 替换 n-gram，不产生机械双字）
         if self._tokenizer is not None:
             try:
                 for w in self._tokenizer.cut_for_search(text):
@@ -55,11 +55,6 @@ class SimpleRetriever:
                         tokens.append(w)
             except Exception:
                 pass
-        # bigram 兜底（未登录词重叠特征）
-        chinese = re.findall(r'[一-鿿]+', text)
-        for seg in chinese:
-            for i in range(len(seg) - 1):
-                tokens.append(seg[i:i+2])
         # 英文/数字词
         english = re.findall(r'[a-zA-Z0-9]+', text)
         tokens.extend([t.lower() for t in english])
