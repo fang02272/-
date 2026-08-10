@@ -1,4 +1,5 @@
-| 466 |  | 实用焊接工艺手册 |  |  |  |  |  |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 续表 1070 | 1060 1050 |  |  |  |  |  |  |
-|  | 2A12 2A14 2A16 2B16 3A21 3003 5A02 5A03 5083 6A02 6061 7005 母材之 | 与母材配用的焊丝①②③ SAIMg-5@ 5086 SAIMg-5@ 6063 SAIMg-5@ 5083 母材之 | SAISi-1@ SAIMg-5 SAISi-1@ 6A02 6063 5086 6061 | X5180 7005 | ）本表中的推荐意见适用于性气体保护焊接方法。氧燃气火焰气焊时，通常只采用SAI-1、SAI-2、SAI-3、SAISi-1。 本表内未填写焊丝的母材组合不推荐用于焊接设计或需通过试验选用焊丝。 ? ? | 某些场合可用SAL-1或SAl-2、SA1-3。 某些场合可用SAIMg-3。 某些场合可用SAIMg-3。 某些场合可用SAISi-1。 ? | 较高的焊缝强度。SAIMg-1适于在持续的较高温度下使用。 |
+| 382 | 实用焊接工艺手册 |  |  |  |  |  |  |  |  |  |  |  |  |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 焊剂 埋弧焊 | HJ260,HJ151 SJ601~SJ608 HJ172.SJ608 | SJ701 HJ172 | HJ260,HJ172 | SJ601 | HJ260,HJ172 | SJ601 | HJ260,HJ172 | SJ601 | HJ260,HJ172 | SJ601 |  |  | SJ601 |
+| 焊丝 奥氏体不锈钢与耐热钢焊接材料的选用 氩弧焊丝 牌号 电焊条 表8-5 型号 | H0Cr20Ni10Ti H00Cr21Nil0 H0Cr20Ni10Ti H00Cr21Ni10 A002 A102 E308L-16 E308-16 | H0Cr20Ni10Nb HoCr20Ni10Nb HOCr20Ni10Nb HOCr20Ni10Nb A132 A132 E347-16 E347-16 | H00Cr19Ni12Mo2 H00Cr19Ni12Mo2 A022 E316L-16 |  | H00Cr19Ni12Mo2 H00Cr19Ni12Mo1 A022 E316L-16 | H00Cr20Ni14Mo3 H0Cr20Ni14Mo3 A242 E317-16 | H00Cr19Ni12Mo2 | H00Cr20Ni14Mo3 H00Cr19Ni12Mo2 A022 E316L-16 | H00Cr19Ni12Mo2 | H00Cr20Ni14Mo3 H00Cr19Ni12Mo2 A002 E308L-16 | A032 E317MoCuL-16 | A802 | H00Cr21Ni10 H00Cr21Ni10 A002 E308L-16 |
+| 钢号 | 0Cr18Ni9Ti 0Cr18Ni9 0Cr19Ni9 | 0Cr18Nil1Nb 1Cr18Ni11Nb 1Cr18Ni9Ti | 0Cr18Ni12Mo2Ti | 1Cr18Ni12Mo2Ti | 0Cr18Ni12Mo3Ti | 1Cr18Ni12Mo3Ti |  | 00Cr17Ni14Mo2 | 00Cr17Ni14Mo3 | 00Cr19Ni13Mo3 | 00Cr18Ni14Mo2Cu2 | 0Cr18Ni18Mo2Cu2Ti | 00Cr18Ni10 |
