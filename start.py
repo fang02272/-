@@ -61,37 +61,24 @@ def auto_learn_uploads():
         return
 
     print(f"   📂 发现 {len(new_pdfs)} 本新书，正在自动学习...")
-    from rag_retriever import get_rag
-    rag = get_rag()
 
     for pdf_path in new_pdfs:
         try:
             print(f"      ⏳ {pdf_path.name}...")
             parsed = parser.parse(str(pdf_path))
-            store.learn_book(
+            source_id = store.learn_book(
                 filename=pdf_path.name,
                 full_text=parsed["full_text"],
                 tables=parsed["tables"],
                 page_count=parsed["page_count"],
                 images=parsed["images"],
             )
-            src = store.get_source(pdf_path.name.replace('.pdf', '')[:40])
+            src = store.get_source(source_id)
             ch = src.get("chapter_count", 0) if src else 0
             kw = src.get("keyword_count", 0) if src else 0
             print(f"      ✅ {pdf_path.name} — {ch}章, {kw}关键词, {parsed['text_length']}字")
         except Exception as e:
             print(f"      ❌ {pdf_path.name} — {e}")
-
-    # 重建RAG
-    rag.remove_pdf_documents()
-    for src in store.list_sources():
-        chapters = store.get_chapters(src["id"])
-        for ch in chapters:
-            chunk = f"《{src['filename']}》 {ch['title']}\n{ch.get('summary','')}\n{ch.get('content','')[:1000]}"
-            rag.add_pdf_document(f"{src['id']}_{ch['title'][:30]}", chunk)
-    all_texts = store.get_all_full_texts()
-    if all_texts:
-        rag.add_pdf_document("all_uploads", all_texts)
 
     print(f"   ✅ 学习完成，知识库现有 {len(store.list_sources())} 本书")
 
