@@ -50,10 +50,208 @@ OCR_CHAR_FIXES = [("馈", "铝"), ("铭", "钨")]
 class PDFParser:
     """PDF 全文解析器：提取文本、表格、图片"""
 
-    def __init__(self, upload_dir: str = "uploads"):
+    def __init__(self, upload_dir: str = "uploads",
+                 ocr_dpi: float = 2.0, ocr_min_confidence: float = 0.5):
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         self._last_warning = ""
+        # OCR 配置（定向表格重建用）
+        self.ocr_dpi = ocr_dpi
+        self.ocr_min_confidence = ocr_min_confidence
+
+    # ============================================================
+    # OCR 缓存合成 / 表格候选页定位（参考 relearn_tables 算法）
+    # ============================================================
+    @staticmethod
+    def _compose_ocr_text(cache_path, total_pages: int = None) -> str:
+        """从 OCR 缓存文件合成全文：{页号: 行列表} → [Page N] 格式文本"""
+        pages = {}
+        cur = None
+        buf = []
+        for line in cache_path.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\[Page (\d+)\]", line)
+            if m:
+                if cur is not None:
+                    pages[cur] = buf
+                cur, buf = int(m.group(1)), []
+            elif cur is not None:
+                buf.append(line)
+        if cur is not None:
+            pages[cur] = buf
+        parts = []
+        for k in sorted(pages):
+            text = "\n".join(pages[k]).strip()
+            if text:
+                parts.append(f"[Page {k}]\n{text}")
+        return "\n\n".join(parts)
+
+    def find_table_pages(self, cache_path, total_pages: int = None) -> list:
+        """定位表格候选页：数字行多(>=8) 或 含「表 X-Y」标题"""
+        cache_path = Path(cache_path)
+        pages = {}
+        cur = None
+        buf = []
+        for line in cache_path.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\[Page (\d+)\]", line)
+            if m:
+                if cur is not None:
+                    pages[cur] = buf
+                cur, buf = int(m.group(1)), []
+            elif cur is not None:
+                buf.append(line)
+        if cur is not None:
+            pages[cur] = buf
+        cands = []
+        for pno, lines in pages.items():
+            digit_lines = sum(1 for l in lines if re.search(r"\d", l))
+            has_caption = any(re.match(r"\s*表\s*\d+(\.\d+)*", l) for l in lines)
+            if digit_lines >= 8 or has_caption:
+                cands.append(pno)
+        return cands
+
+    # ============================================================
+    # 表格重建 — 由 OCR 文本框坐标聚类还原表格
+    # ============================================================
+    def _reconstruct_tables_from_boxes(self, page_boxes: dict) -> list:
+        """
+        由每页的 OCR 文本框 (bbox, text, score) 重建表格。
+        page_boxes = {页号: [(x0,y0,x1,y1, text, score), ...]}
+        返回 [{page, index, headers, rows, markdown}]
+        """
+        tables = []
+        for pno, boxes in page_boxes.items():
+            if not boxes or len(boxes) < 6:
+                continue
+            valid = [b for b in boxes if (b[2] - b[0]) > 15 and len(b[4]) >= 1]
+            if len(valid) < 6:
+                continue
+            cols = self._cluster_cols(valid)
+            if len(cols) < 2:
+                continue
+            rows = self._cluster_rows(valid)
+            if len(rows) < 2:
+                continue
+            grid = self._build_grid(valid, rows, cols)
+            if not grid or len(grid) < 2:
+                continue
+            # 质量过滤：表头行多列 + 平均每行非空格≥2（过滤散文/页眉误判）
+            avg_filled = sum(1 for r in grid for c in r if c.strip()) / len(grid)
+            header_filled = sum(1 for c in grid[0] if c.strip())
+            if avg_filled < 1.8 or header_filled < 2:
+                continue
+            md = self._grid_to_markdown(grid)
+            if not md:
+                continue
+            tables.append({
+                "page": pno,
+                "index": len(tables),
+                "headers": grid[0],
+                "rows": grid[1:],
+                "markdown": md,
+            })
+        return tables
+
+    @staticmethod
+    def _cluster_cols(boxes: list, tol: float = 24) -> list:
+        """列聚类：按 x 区间重叠度 + 中心接近度合并（比仅中心距离更鲁棒）"""
+        cols = []  # [{center, min_x, max_x, items}] items 存 box 索引
+        for idx, b in enumerate(boxes):
+            x0, _, x1, _, _, _ = b
+            cx = (x0 + x1) / 2
+            best_i, best_overlap = None, 0
+            for i, col in enumerate(cols):
+                overlap = min(x1, col["max_x"]) - max(x0, col["min_x"])
+                center_close = abs(cx - col["center"]) <= tol
+                if overlap > best_overlap and (overlap > 0 or center_close):
+                    best_overlap, best_i = overlap, i
+            if best_i is None:
+                cols.append({"center": cx, "min_x": x0, "max_x": x1, "items": [idx]})
+            else:
+                col = cols[best_i]
+                col["items"].append(idx)
+                n = len(col["items"])
+                col["center"] = (col["center"] * (n - 1) + cx) / n
+                col["min_x"] = min(col["min_x"], x0)
+                col["max_x"] = max(col["max_x"], x1)
+        cols.sort(key=lambda c: c["center"])
+        return cols
+
+    @staticmethod
+    def _cluster_rows(boxes: list, tol: float = 14) -> list:
+        """行聚类：按 y 区间重叠 + 中心接近合并"""
+        rows = []  # [{center, min_y, max_y, items}] items 存 box 索引
+        for idx, b in enumerate(boxes):
+            _, y0, _, y1, _, _ = b
+            cy = (y0 + y1) / 2
+            best_i, best_overlap = None, 0
+            for i, row in enumerate(rows):
+                overlap = min(y1, row["max_y"]) - max(y0, row["min_y"])
+                center_close = abs(cy - row["center"]) <= tol
+                if overlap > best_overlap and (overlap > 0 or center_close):
+                    best_overlap, best_i = overlap, i
+            if best_i is None:
+                rows.append({"center": cy, "min_y": y0, "max_y": y1, "items": [idx]})
+            else:
+                row = rows[best_i]
+                row["items"].append(idx)
+                n = len(row["items"])
+                row["center"] = (row["center"] * (n - 1) + cy) / n
+                row["min_y"] = min(row["min_y"], y0)
+                row["max_y"] = max(row["max_y"], y1)
+        rows.sort(key=lambda r: r["center"])
+        return rows
+
+    def _build_grid(self, boxes: list, rows: list, cols: list) -> list:
+        """把每个 box 归入 (行, 列)，构建二维网格"""
+        # 计算每个 box 所属列索引（按 x 中心最近）
+        box_col = {}
+        for i, b in enumerate(boxes):
+            cx = (b[0] + b[2]) / 2
+            best, best_d = 0, 1e9
+            for ci, col in enumerate(cols):
+                d = abs(col["center"] - cx)
+                if d < best_d:
+                    best_d, best = d, ci
+            box_col[i] = best
+        # 按行分组：每个 box → row_idx
+        row_of = {}
+        for ri, row in enumerate(rows):
+            for i in row["items"]:
+                row_of[i] = ri
+        grid = {}  # (r, c) -> text
+        for i, b in enumerate(boxes):
+            r, c = row_of[i], box_col[i]
+            prev = grid.get((r, c), "")
+            grid[(r, c)] = (prev + " " + b[4]).strip() if prev else b[4]
+        n_rows = max(row_of.values()) + 1
+        n_cols = len(cols)
+        # 稀疏度过滤：填充率过低则丢弃该页（表格常有空格，阈值放宽到 0.22）
+        total_cells = n_rows * n_cols
+        filled = len(grid)
+        if total_cells == 0 or filled / total_cells < 0.22:
+            return []
+        out = []
+        for r in range(n_rows):
+            row = []
+            for c in range(n_cols):
+                row.append(grid.get((r, c), ""))
+            # 全空行跳过
+            if not any(cell.strip() for cell in row):
+                continue
+            out.append(row)
+        return out
+
+    @staticmethod
+    def _grid_to_markdown(grid: list) -> str:
+        if not grid:
+            return ""
+        n_cols = max(len(row) for row in grid)
+        lines = ["| " + " | ".join(grid[0]) + " |",
+                 "|" + "|".join([" --- " for _ in range(n_cols)]) + "|"]
+        for row in grid[1:]:
+            padded = row + [""] * (n_cols - len(row))
+            lines.append("| " + " | ".join(padded[:n_cols]) + " |")
+        return "\n".join(lines)
 
     # ============================================================
     # 文本提取 (含OCR回退)
