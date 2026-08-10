@@ -12,11 +12,14 @@ v3.1 增强:
 """
 
 import json
+import logging
 import os
 import re
 from collections import Counter
 from pathlib import Path
 from typing import List, Dict, Optional, Set
+
+logger = logging.getLogger("knowledge_store")
 
 # 导入焊接领域知识库，用于构建统一术语词库
 from app.welding_knowledge_base import (
@@ -103,6 +106,9 @@ class KnowledgeStore:
 
         # Step 2: 按目录拆分章节
         chapters = self._split_chapters(full_text, toc)
+
+        # Step 2.5: 表格内容并入章节正文（提升检索命中率 + 关键词解析率）
+        chapters = self._merge_tables_into_chapters(chapters, tables)
 
         # Step 3: 为每个章节提取关键词和摘要
         # 通用词已在类级别定义（见 _GENERIC_WORDS）
@@ -364,6 +370,74 @@ class KnowledgeStore:
                 toc_entries.insert(0, {"title": p, "page_hint": ""})
 
         return toc_entries[:60]
+
+    # ============================================================
+    # 表格并入章节（提升检索命中 + 关键词解析率）
+    # ============================================================
+    def _merge_tables_into_chapters(self, chapters: list, tables: list) -> list:
+        """把表格 markdown 并入所属章节正文：
+        - 扫描版表格带 page 号 → 插入到章节内容中 [Page N] 标记之后
+        - 无页码匹配 → 追加到末尾章节
+        效果：章节内容含表格数值 → 关键词提取命中表格词、检索/工艺卡片可引用。"""
+        if not tables:
+            return chapters
+        for ch in chapters:
+            ch.setdefault("content", "")
+        merged = 0
+        for table in tables:
+            if not isinstance(table, dict) or not table.get("markdown"):
+                continue
+            md = "\n\n【表格】\n" + table["markdown"] + "\n"
+            page = table.get("page")
+            marker = f"[Page {page}]" if page else ""
+            target = None
+            if marker:
+                for ch in chapters:
+                    if marker in ch.get("content", ""):
+                        target = ch
+                        break
+            if target:
+                idx = target["content"].find(marker)
+                nl = target["content"].find("\n", idx)
+                ins = (nl + 1) if nl > 0 else (idx + len(marker))
+                target["content"] = target["content"][:ins] + md + target["content"][ins:]
+                merged += 1
+            else:
+                # 无页码 → 内容匹配：按表头/单元格术语与章节内容重合度并入最相关章节
+                best = self._best_chapter_for_table(table, chapters)
+                if best is not None:
+                    best["content"] = best["content"].rstrip() + "\n" + md
+                    merged += 1
+                elif chapters:
+                    chapters[-1]["content"] = chapters[-1]["content"].rstrip() + "\n" + md
+                    merged += 1
+        if merged:
+            logger.info(f"表格并入章节: {merged}/{len(tables)}")
+        return chapters
+
+    @staticmethod
+    def _best_chapter_for_table(table: dict, chapters: list):
+        """按表格术语与章节内容重合度，找最相关章节（无页码时的内容匹配兜底）"""
+        md = table.get("markdown", "")
+        # 提取表格中的中文术语（2-6字）
+        terms = set(re.findall(r'[一-鿿]{2,6}', md))
+        if not terms:
+            return None
+        # 取频率最高的20个术语作为特征
+        from collections import Counter
+        term_freq = Counter(re.findall(r'[一-鿿]{2,6}', md))
+        features = [t for t, _ in term_freq.most_common(20)]
+        best_ch, best_score = None, 0
+        for ch in chapters:
+            content = ch.get("content", "")
+            if not content:
+                continue
+            score = sum(1 for t in features if t in content)
+            if score > best_score:
+                best_score, best_ch = score, ch
+        if best_ch is not None and best_score >= 2:
+            return best_ch
+        return None
 
     # ============================================================
     # 章节拆分

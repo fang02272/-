@@ -1,25 +1,6 @@
-| ·Al
-·Pb
-·Ag
-·Cu
-·Ni-Cr
-●Ni
-·Fe
-·Ti
-·Nb、Co
-● Ta、Pt
-·Zr、Mo
-·W
-·Si | ·ZrO₂
-·BeO
-·蓝宝石
-·Al₂O₃(99.5%)
-·Al₂O₃(94%)
-·AIN
-·3Al₂O₃-2SiO₂
-·SiC
-·Si₃N₄
-·SiO₂
-.C |
+| 上述组合 |  |
 | --- | --- |
-| 金属 | 陶瓷 |
+| PVD | 喷涂 |
+|  | 离子镀 |
+| IVD |  |
+| 等离子喷涂 |  |

@@ -11,6 +11,7 @@
 """
 
 import io
+import re
 import sys
 
 # 修复Windows控制台编码问题
@@ -25,13 +26,14 @@ if sys.platform == 'win32':
             sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
     except (ValueError, AttributeError):
         pass
-from typing import List, Dict
+from typing import List, Dict, Set, Optional
 from app.welding_knowledge_base import (
     KNOWLEDGE_CATEGORIES,
     KEYWORD_CATEGORY_MAP,
     CROSS_DOMAIN_KNOWLEDGE,
     SCIENCE_POPULARIZATION,
     DEEP_ANALYSIS,
+    TERM_ALIAS_MAP,
     get_recommendations,
     get_source_reference,
     get_knowledge_transfer,
@@ -65,48 +67,175 @@ class WeldingQASystem:
     # ----------------------------------------------------------------
     # 1. 关键词提取与匹配
     # ----------------------------------------------------------------
-    def extract_keywords(self, query: str) -> List[str]:
-        """从用户输入中提取焊接相关关键词（同时搜索原书+所有上传PDF）。
-        v2.5：精确子串匹配 + 部分匹配（字符包含度），提高组合词命中率。"""
-        found_keywords = []
-        query_lower = query.lower()
-        query_chars = {c for c in query_lower if '一' <= c <= '鿿'}
+    # ----------------------------------------------------------------
+    # 1. 关键词提取与匹配（六阶段流水线，参考焊接知识库融合版）
+    # ----------------------------------------------------------------
+    # 繁简/异体字归一化映射（焊接领域常见）
+    _CHAR_NORMALIZE = str.maketrans({
+        '脫': '脱', '氣': '气', '鋼': '钢', '鐵': '铁', '鋁': '铝',
+        '銅': '铜', '鈦': '钛', '鎳': '镍', '鎂': '镁', '鉻': '铬',
+        '錳': '锰', '鎢': '钨', '釺': '钎', '鋅': '锌', '鉛': '铅',
+        '錫': '锡', '銀': '银', '鉬': '钼', '鈷': '钴', '鈮': '铌',
+        '鋯': '锆', '鉭': '钽', '電': '电', '熱': '热', '層': '层',
+        '區': '区', '連': '连', '極': '极', '溫': '温', '濕': '湿',
+        '潤': '润', '燒': '烧', '壓': '压', '擊': '击', '斷': '断',
+        '結': '结', '縫': '缝', '線': '线', '質': '质', '體': '体',
+        '變': '变', '點': '点', '離': '离', '擴': '扩', '構': '构',
+        '組': '组', '織': '织', '細': '细', '顯': '显', '鏡': '镜',
+        '顆': '颗', '狀': '状', '態': '态', '維': '维', '銲': '焊',
+        '機': '机', '複': '复', '雜': '杂', '數': '数', '據': '据',
+        '處': '处', '術': '术', '藝': '艺', '範': '范', '圍': '围',
+        '標': '标', '準': '准', '確': '确', '驗': '验', '測': '测',
+        '試': '试', '證': '证', '認': '认', '識': '识', '設': '设',
+        '備': '备', '裝': '装', '關': '关', '係': '系', '應': '应',
+        '響': '响', '與': '与', '為': '为', '會': '会', '銹': '锈',
+    })
+    _SUBSCRIPT_NORMALIZE = str.maketrans({
+        '₀': '0', '₁': '1', '₂': '2', '₃': '3', '₄': '4',
+        '₅': '5', '₆': '6', '₇': '7', '₈': '8', '₉': '9',
+        '₊': '+', '₋': '-',
+    })
+    _CANONICAL_MAP: Dict[str, str] = {}
+    _REVERSE_ALIAS_MAP: Dict[str, list] = {}
+    _STOP_WORDS = {
+        '焊', '焊接', '保护', '气体', '工艺', '方法', '技术', '材料',
+        '应用', '参数', '质量', '缺陷', '结构', '性能', '标准', '设备',
+        '气体保护', '焊缝金属', '焊接接头', '焊接工艺', '焊接方法',
+        '焊接材料', '焊接技术', '焊接参数', '焊接结构',
+        'CO2', 'CO₂', 'CO', 'Ar', 'He', 'N2', 'O2', 'H2',
+    }
 
-        # 1. 精确子串匹配（原书）
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """繁简/异体字归一化 + 上下标数字归一化"""
+        text = text.translate(WeldingQASystem._CHAR_NORMALIZE)
+        text = text.translate(WeldingQASystem._SUBSCRIPT_NORMALIZE)
+        return text
+
+    @classmethod
+    def _init_canonical_map(cls):
+        """从 TERM_ALIAS_MAP 构建双向索引（别名→规范词 / 规范词→别名）"""
+        if cls._CANONICAL_MAP:
+            return
+        for canonical, aliases in TERM_ALIAS_MAP.items():
+            for alias in aliases:
+                if alias not in cls._CANONICAL_MAP:
+                    cls._CANONICAL_MAP[alias] = canonical
+            cls._REVERSE_ALIAS_MAP[canonical] = aliases
+        for canonical in TERM_ALIAS_MAP:
+            cls._CANONICAL_MAP.setdefault(canonical, canonical)
+
+    @classmethod
+    def _is_stop_word(cls, word: str) -> bool:
+        return word in cls._STOP_WORDS
+
+    def extract_keywords(self, query: str) -> List[str]:
+        """
+        六阶段流水线提取焊接领域关键词（融合焊接知识库算法）：
+        1. 归一化(繁简/上下标) + 数值参数  2. 候选收集(子串+ngram+去标点)
+        3. 吞并过滤(长术语吞并短子串)  4. 规范词扩展(双向别名)
+        5. 噪声过滤(单字符/元素/停用词)  6. 长度降序输出
+        """
+        self._init_canonical_map()
+        candidates: Dict[str, int] = {}
+
+        # 阶段1：归一化 + 数值参数提取
+        query = self._normalize_text(query)
+        query_lower = query.lower()
+        _PARAM_PATTERNS = [
+            r'\d+\.?\d*\s*mm', r'\d+\.?\d*\s*A\b', r'\d+\.?\d*\s*V\b',
+            r'\d+\.?\d*\s*[°℃]C?', r'\d+\.?\d*\s*cm/min', r'\d+\.?\d*\s*m/min',
+            r'\d+\.?\d*\s*L/min', r'\d+\.?\d*\s*kJ/mm', r'\d+\.?\d*\s*kJ/cm',
+            r'\d+\.?\d*\s*MPa', r'\d+\.?\d*\s*kW', r'\d+\.?\d*\s*kg',
+            r'\d+\.?\d*\s*mm/s', r'Φ\s*\d+\.?\d*\s*mm', r'φ\s*\d+\.?\d*\s*mm',
+            r'\d+\.?\d*\s*μm',
+        ]
+        for pattern in _PARAM_PATTERNS:
+            for m in re.finditer(pattern, query, re.IGNORECASE):
+                param_str = m.group(0).strip()
+                if param_str and param_str not in candidates:
+                    candidates[param_str] = len(param_str)
+
+        # 阶段2：候选收集 — 子串 + ngram + 去标点 三通道
         for keyword in self.keyword_map:
             if keyword.lower() in query_lower:
-                found_keywords.append(keyword)
+                candidates[keyword] = max(candidates.get(keyword, 0), len(keyword))
+        chinese_runs = re.findall(r'[一-鿿]{2,}', query)
+        all_ngrams = set()
+        for run in chinese_runs:
+            for n in (2, 3, 4):
+                for i in range(len(run) - n + 1):
+                    all_ngrams.add(run[i:i + n])
+        for ngram in all_ngrams:
+            if ngram in self.keyword_map:
+                candidates[ngram] = max(candidates.get(ngram, 0), len(ngram))
+        query_normalized = re.sub(
+            r'[\s,，、。/；;：:！!？?（）()【】\[\]{}"\'""''\\\\/+\\-\\*=<>]', '', query
+        )
+        if query_normalized != query:
+            for keyword in self.keyword_map:
+                if keyword not in candidates and keyword.lower() in query_normalized.lower():
+                    candidates[keyword] = max(candidates.get(keyword, 0), len(keyword))
 
-        # 2. 部分匹配：中文关键词字符包含度 ≥70%（至少2字重合）
-        #    "热影响区冷裂纹怎么防止" → 命中"热影响区"/"冷裂纹"这类组合词
-        partial_added = 0
-        for keyword in self.keyword_map:
-            if partial_added >= 6:
-                break
-            kw = keyword.lower()
-            if kw in query_lower or kw in found_keywords:
-                continue
-            if len(kw) >= 3 and self._partial_match(kw, query_chars):
-                found_keywords.append(keyword)
-                partial_added += 1
-
-        # 3. 搜索所有上传PDF的关键词（精确 + 部分）
+        # 外部PDF关键词
         for src_name, src_info in self.external_sources.items():
             for kw in src_info.get("keywords", []):
-                if kw in found_keywords:
-                    continue
-                kwl = kw.lower()
-                if kwl in query_lower:
-                    found_keywords.append(kw)
-                elif len(kwl) >= 3 and partial_added < 10 and self._partial_match(kwl, query_chars):
-                    found_keywords.append(kw)
-                    partial_added += 1
+                if kw.lower() in query_lower and kw not in candidates:
+                    candidates[kw] = len(kw)
 
-        return found_keywords
+        # 阶段3：吞并过滤 — 长术语吞并短子串（长度比 ≤ 66% 或停用词）
+        sorted_candidates = sorted(candidates.items(), key=lambda x: -x[1])
+        filtered: List[str] = []
+        filtered_lengths: List[int] = []
+        for kw, kw_len in sorted_candidates:
+            if len(kw) <= 1:
+                continue
+            parent_len = 0
+            for sel, sl in zip(filtered, filtered_lengths):
+                if kw != sel and kw in sel:
+                    parent_len = max(parent_len, sl)
+            if parent_len > 0:
+                is_fragment = (kw_len / parent_len <= 0.66) or self._is_stop_word(kw)
+                if is_fragment:
+                    continue
+            filtered.append(kw)
+            filtered_lengths.append(kw_len)
+
+        # 阶段4：规范词扩展（双向）
+        expanded: List[str] = []
+        added_set: Set[str] = set()
+        for kw in filtered:
+            if kw not in added_set:
+                expanded.append(kw)
+                added_set.add(kw)
+            canonical = self._CANONICAL_MAP.get(kw, '')
+            if canonical and canonical != kw and canonical not in added_set:
+                expanded.append(canonical)
+                added_set.add(canonical)
+            if kw in self._REVERSE_ALIAS_MAP:
+                for alias in self._REVERSE_ALIAS_MAP[kw]:
+                    if alias not in added_set and 3 <= len(alias) <= 5 and alias.isupper() and alias.isalpha():
+                        expanded.append(alias)
+                        added_set.add(alias)
+
+        # 阶段5：后处理 — 单字符/元素符号/停用词过滤
+        expanded = [k for k in expanded if len(k) >= 2 or '一' <= k <= '鿿']
+        expanded = [
+            k for k in expanded
+            if not (len(k) == 2 and k.isascii() and k[0].isupper() and k[1].islower()
+                    and k not in query.split() and f' {k} ' not in query)
+        ]
+        specific = [k for k in expanded if not self._is_stop_word(k) and len(k) >= 2]
+        if len(specific) >= 2:
+            expanded = [k for k in expanded if not self._is_stop_word(k)]
+
+        # 阶段6：长度降序
+        expanded.sort(key=lambda x: -len(x))
+        return expanded
 
     @staticmethod
     def _partial_match(keyword: str, query_chars: set) -> bool:
-        """中文关键词的字符包含度匹配（去重后字符 ≥70% 在查询中出现）"""
+        """中文关键词的字符包含度匹配（兜底，供外部调用）"""
         kw_chars = {c for c in keyword if '一' <= c <= '鿿'}
         if len(kw_chars) < 2:
             return False
