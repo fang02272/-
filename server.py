@@ -7,6 +7,8 @@ FastAPI 后端 — LLM驱动 + RAG检索 + PDF导入 + 书籍知识库
 import sys
 import os
 import time
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Dict
 
@@ -24,11 +26,32 @@ from welding_qa_system import WeldingQASystem
 from welding_knowledge_base import KNOWLEDGE_CATEGORIES
 from knowledge_store import get_store
 
+logger = logging.getLogger("welding_qa.server")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """在实际提供 API 的进程中，从持久化知识库重建内存 RAG 索引。"""
+    from rag_retriever import get_rag
+
+    stats = get_rag().rebuild_from_store(get_store())
+    app.state.rag_index_stats = stats
+    logger.info(
+        "RAG index rebuilt: %s/%s sources, %s chapters, %s chunks",
+        stats["indexed_sources"],
+        stats["sources"],
+        stats["chapters"],
+        stats["chunks"],
+    )
+    yield
+
+
 # ---- FastAPI ----
 app = FastAPI(
     title="焊接工艺专家系统",
     description="LLM驱动的焊接知识智能问答 + PDF知识库扩展 + RAG检索增强",
     version="2.0.0",
+    lifespan=lifespan,
 )
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
@@ -98,6 +121,7 @@ async def health():
         "service": "焊接工艺专家系统 v2.0",
         "llm_available": llm.available,
         "llm_model": llm.model if llm.available else None,
+        "rag_index": getattr(app.state, "rag_index_stats", {}),
     }
 
 
@@ -404,7 +428,7 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
             filepath = parser.save_upload(content, file.filename)
             parsed = parser.parse(filepath)
             source_id = store.learn_book(
-                filename=file.filename,
+                filename=parsed["filename"],
                 full_text=parsed["full_text"],
                 tables=parsed["tables"],
                 page_count=parsed["page_count"],
@@ -424,23 +448,16 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
         except Exception as e:
             results.append({"filename": file.filename, "status": "error", "reason": str(e)})
 
-    # 一次性重建 RAG（索引所有书）
-    rag.remove_pdf_documents()
-    all_texts = store.get_all_full_texts()
-    if all_texts:
-        rag.add_pdf_document("all_uploads", all_texts)
-    # 每本书每章也索引
-    for src in store.list_sources():
-        chapters = store.get_chapters(src["id"])
-        for ch in chapters:
-            chunk = f"《{src['filename']}》 {ch['title']}\n{ch.get('summary', '')}\n{ch.get('content', '')[:1000]}"
-            rag.add_pdf_document(f"{src['id']}_{ch['title'][:30]}", chunk)
+    # 统一从持久化知识库重建，避免全文和章节重复入索引。
+    index_stats = rag.rebuild_from_store(store)
+    app.state.rag_index_stats = index_stats
 
     return {
         "total": len(files),
         "learned": sum(1 for r in results if r["status"] == "ok"),
         "results": results,
         "catalog": store.build_knowledge_catalog(),
+        "rag_index": index_stats,
     }
 
 
@@ -466,25 +483,17 @@ async def upload_pdf(file: UploadFile = File(...)):
         # === 完整学习流程 ===
         store = get_store()
         source_id = store.learn_book(
-            filename=file.filename,
+            filename=parsed["filename"],
             full_text=parsed["full_text"],
             tables=parsed["tables"],
             page_count=parsed["page_count"],
             images=parsed["images"],
         )
 
-        # 重建 RAG 索引
+        # 统一从全部 saved_knowledge 重建 RAG 索引
         rag = _get_rag()
-        rag.remove_pdf_documents()
-        # 将每章的摘要 + 内容分块索引
-        chapters = store.get_chapters(source_id)
-        for ch in chapters:
-            chunk_text = f"《{file.filename}》 {ch['title']}\n{ch.get('summary', '')}\n{ch.get('content', '')[:1000]}"
-            rag.add_pdf_document(f"{source_id}_{ch['title'][:30]}", chunk_text)
-        # 也索引完整全文
-        all_texts = store.get_all_full_texts()
-        if all_texts:
-            rag.add_pdf_document("combined_uploads", all_texts)
+        index_stats = rag.rebuild_from_store(store)
+        app.state.rag_index_stats = index_stats
 
         catalog = store.build_knowledge_catalog()
         source_info = store.get_source(source_id)
@@ -504,6 +513,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             "keyword_count": source_info.get("keyword_count", 0) if source_info else 0,
             "all_keywords": (source_info.get("all_keywords", [])[:50]) if source_info else [],
             "knowledge_catalog": catalog,
+            "rag_index": index_stats,
             "message": f"✅ 已完整学习《{parsed['filename']}》— {parsed['page_count']}页, 提取{source_info.get('chapter_count', 0)}章节, {source_info.get('keyword_count', 0)}关键词, {parsed['tables_count']}表格, {parsed['text_length']}字数据全部入库",
         }
     except HTTPException:
@@ -525,32 +535,36 @@ async def delete_upload(filename: str):
     store = get_store()
     parser = _get_parser()
 
-    # 从知识库中移除
-    source_id = filename.replace('.pdf', '').replace(' ', '_')[:40]
-    store.unregister(source_id)
+    # 从知识库中移除与该上传文件对应的知识源
+    source = store.get_source_by_filename(filename)
+    if source:
+        store.unregister(source["id"])
 
     # 从上传目录移除
     parser.delete_upload(filename)
 
-    # 重建 RAG 索引
+    # 统一从剩余的 saved_knowledge 重建 RAG 索引
     rag = _get_rag()
-    rag.remove_pdf_documents()
-    all_texts = store.get_all_full_texts()
-    if all_texts:
-        rag.add_pdf_document("combined_uploads", all_texts)
+    index_stats = rag.rebuild_from_store(store)
+    app.state.rag_index_stats = index_stats
 
-    return {"status": "ok", "message": f"已删除 {filename}，知识库已更新"}
+    return {"status": "ok", "message": f"已删除 {filename}，知识库已更新", "rag_index": index_stats}
 
 
 @app.delete("/api/uploaded-files")
 async def clear_all_uploads():
     """清除所有上传文件"""
+    store = get_store()
     parser = _get_parser()
-    for f in parser.list_uploads():
+    for f in list(parser.list_uploads()):
+        source = store.get_source_by_filename(f["name"])
+        if source:
+            store.unregister(source["id"])
         parser.delete_upload(f["name"])
     rag = _get_rag()
-    rag.remove_pdf_documents()
-    return {"status": "ok", "message": "所有上传文件已清除"}
+    index_stats = rag.rebuild_from_store(store)
+    app.state.rag_index_stats = index_stats
+    return {"status": "ok", "message": "所有上传文件已清除", "rag_index": index_stats}
 
 
 # ============================================================
