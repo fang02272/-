@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
@@ -252,6 +253,66 @@ class PDFParser:
             padded = row + [""] * (n_cols - len(row))
             lines.append("| " + " | ".join(padded[:n_cols]) + " |")
         return "\n".join(lines)
+
+    def reconstruct_tables(self, filepath: str, cache_path=None) -> list:
+        """扫描版表格自动重建（入库流程复用）：
+        定位候选页 → 定向 OCR(取坐标) → 聚类还原表格。
+        cache_path: OCR 缓存文件（默认 uploads/{stem}_full_ocr.txt）。"""
+        import fitz
+        cache_path = Path(cache_path) if cache_path else self._ocr_output_paths(filepath)[0]
+        if not cache_path.exists():
+            logger.warning(f"无 OCR 缓存，无法定位表格页: {cache_path}")
+            return []
+        cands = self.find_table_pages(cache_path)
+        if not cands:
+            return []
+        # 复用 PaddleOCR 实例（自动 GPU）
+        if PDFParser._paddle_ocr_instance is None:
+            from paddleocr import PaddleOCR
+            import paddle
+            use_gpu = False
+            try:
+                use_gpu = bool(paddle.device.is_compiled_with_cuda()) and \
+                          int(paddle.device.cuda.device_count()) > 0
+            except Exception:
+                use_gpu = False
+            PDFParser._paddle_ocr_instance = PaddleOCR(
+                lang='ch', use_angle_cls=True,
+                device='gpu:0' if use_gpu else 'cpu', show_log=False,
+                det_db_thresh=0.3, det_db_box_thresh=0.5, rec_batch_num=6)
+        ocr = PDFParser._paddle_ocr_instance
+
+        doc = fitz.open(filepath)
+        page_boxes = {}
+        t0 = time.time()
+        try:
+            for i, pno in enumerate(cands, 1):
+                page = doc[pno - 1]
+                try:
+                    img = self._preprocess_page(page, scale=3.0)
+                    result = ocr.ocr(img, cls=True)
+                    boxes = []
+                    if result and result[0]:
+                        for item in result[0]:
+                            if not item or len(item) < 2:
+                                continue
+                            pts, (text, score) = item
+                            text = str(text).strip()
+                            if not text or len(text) < 1 or float(score) < self.ocr_min_confidence:
+                                continue
+                            xs = [pt[0] for pt in pts]
+                            ys = [pt[1] for pt in pts]
+                            boxes.append((min(xs), min(ys), max(xs), max(ys), text, float(score)))
+                    page_boxes[pno] = boxes
+                except Exception as e:
+                    logger.warning(f"表格页 {pno} OCR 失败: {e}")
+                    page_boxes[pno] = []
+                if i % 50 == 0:
+                    el = time.time() - t0
+                    logger.info(f"表格OCR {i}/{len(cands)} 页 ({el / i:.1f}s/页)")
+        finally:
+            doc.close()
+        return self._reconstruct_tables_from_boxes(page_boxes)
 
     # ============================================================
     # 文本提取 (含OCR回退)

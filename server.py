@@ -818,8 +818,8 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
 
             filepath = parser.save_upload(content, file.filename)
 
-            # 扫描版：服务自身无GPU 且存在 .venv-gpu → 子进程后台处理
-            if _is_scanned_pdf(filepath) and not _server_has_gpu() and _gpu_python():
+            # 扫描版：始终走 .venv-gpu 子进程（全文OCR + 表格重建）
+            if _is_scanned_pdf(filepath) and _gpu_python():
                 job_id = _new_job_id()
                 _set_job(job_id, "processing", "GPU 识别中...", file.filename)
                 threading.Thread(target=_run_gpu_ingest_job, args=(job_id, file.filename), daemon=True).start()
@@ -885,9 +885,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         parser = _get_parser()
         filepath = parser.save_upload(content, file.filename)
 
-        # ---- 扫描版：服务自身无GPU 且存在 .venv-gpu → 子进程后台处理 ----
-        # （若服务自身跑在 .venv-gpu，则进程内直接 GPU OCR，更快）
-        if _is_scanned_pdf(filepath) and not _server_has_gpu() and _gpu_python():
+        # ---- 扫描版：始终走 .venv-gpu 子进程（全文OCR + 表格重建 + 进度轮询）----
+        if _is_scanned_pdf(filepath) and _gpu_python():
             job_id = _new_job_id()
             _set_job(job_id, "processing", "GPU 识别中...", file.filename)
             threading.Thread(target=_run_gpu_ingest_job, args=(job_id, file.filename), daemon=True).start()
@@ -896,7 +895,7 @@ async def upload_pdf(file: UploadFile = File(...)):
                 "job_id": job_id,
                 "filename": file.filename,
                 "mode": "gpu_ocr",
-                "message": "扫描版PDF已提交GPU识别，识别完成后自动入库（前端将自动刷新）",
+                "message": "扫描版PDF已提交GPU识别（含表格重建），完成后自动入库（前端将自动刷新）",
             }
 
         # ---- 文字版 / 服务自带GPU / 纯CPU回退：进程内处理 ----
