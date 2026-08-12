@@ -23,3 +23,6 @@ welding_book_full.txt
 # Runtime artifacts
 *.log
 *.tmp
+
+# 任务分工文档
+任务分工/

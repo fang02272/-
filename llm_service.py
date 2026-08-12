@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Optional, Generator
 
 import yaml
 
@@ -15,38 +15,32 @@ logger = logging.getLogger("llm_service")
 
 
 # ============================================================
-# 焊接工艺专家 System Prompt
+# 焊接工艺专家 System Prompt（精简版）
 # ============================================================
-WELDING_EXPERT_PROMPT = """你是一个专业的焊接工艺知识问答系统。你的知识体系由以下来源构成（平等地位，同等重要）：
+WELDING_EXPERT_PROMPT = """你是专业焊接工艺知识问答系统。
 
-## 你的知识来源
-1. **《材料焊接原理》**（王宗杰主编，化学工业出版社，2024，ISBN 978-7-122-44318-2）— 核心焊接理论教材，2篇9章
-2. **用户上传的工艺资料** — 用户导入的焊接工艺手册/标准/论文，已通过完整学习流程入库（目录提取→章节拆分→关键词映射→数据识别），与原书同等对待
+## 知识来源
+1. **《材料焊接原理》**（王宗杰，2024）— 焊接理论教材，2篇9章
+2. **用户上传工艺资料** — 已全文学习，与原书同等对待
 
 ## 回答规则
-- 面对每个问题，你必须**同时检索上述所有知识来源**，将相关内容融合成完整回答
-- 上传资料中的具体参数、表格数据、工艺方案必须**优先使用**
-- 原书的理论原理用于解释「为什么」— 上传资料的参数用于说明「怎么做」
-- 绝对禁止输出 `~~删除线~~` 格式的文字（strikethrough markdown），不要使用波浪线包裹文字
+- 同时检索所有知识来源，融合成完整回答
+- 上传资料的具体参数和表格数据**优先使用**
+- 原书理论解释"为什么"，上传资料说明"怎么做"
+- 禁止输出 `~~删除线~~` 格式
 
-## 回答结构
+## 固定回答结构（必须按此4段输出）
 ### 🔍 专家分析
-从焊接原理（原书理论）和工艺实践（上传资料）两个维度综合分析。引用格式：「据《材料焊接原理》...」「根据《XXX手册》...」
+从焊接原理和工艺实践两维度分析。引用格式：「据《材料焊接原理》...」「根据《XXX手册》...」
 
 ### 📖 全面科普
-- 核心概念定义与原理
-- **用Markdown表格**呈现参数对比/选型建议（直接引用上传资料中的表格数据）
-- 工艺流程可用 ```mermaid 代码块描述
+核心概念 + Markdown参数表格（直接引用上传资料数据）
 
 ### ⚙️ 工艺方案
-- 具体可操作的参数范围（优先使用上传资料的数值）
-- 设备选型建议
-- 质量检验要点
+具体参数范围 + 设备选型 + 质量检验要点
 
 ### 📚 知识来源
-- 参考《材料焊接原理》第X章第X节「具体节名」
-- 参考《上传资料名称》「具体章节名/表格名」
-- 每条引用都要精确可追溯，说明从哪本书的哪个章节获取"""
+精确引用书名+章节，每条可追溯"""
 
 
 def _clean_output(text: str) -> str:
@@ -92,7 +86,7 @@ class LLMClient:
         self.api_base = llm_cfg.get("api_base", "").rstrip("/")
         self.api_key = llm_cfg.get("api_key", "")
         self.model = llm_cfg.get("model", "deepseek-chat")
-        self.max_tokens = llm_cfg.get("max_tokens", 4096)
+        self.max_tokens = llm_cfg.get("max_tokens", 2000)   # 精简：4096 → 2000
         self.temperature = llm_cfg.get("temperature", 0.3)
         self.timeout = llm_cfg.get("timeout_seconds", 120)
         self.available = bool(self.api_key and self.api_key not in ("sk-your-api-key-here", ""))
@@ -134,45 +128,106 @@ class LLMClient:
             logger.error(f"LLM call failed: {e}")
         return None
 
-    def chat_sync(self, user_message: str, context: str = "", uploaded_files: list = None,
-                  knowledge_catalog: str = "", cross_source_matches: list = None) -> Optional[str]:
+    def chat_stream(self, messages: list) -> Generator[str, None, None]:
         """
-        便捷方法：发送单条消息给焊接专家
+        流式调用 LLM，逐块 yield 文本片段（token by token）。
+        调用方负责捕获异常。
+        """
+        if not self.available:
+            return
+
+        url = f"{self.api_base}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": True,
+        }
+
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = chunk["choices"][0].get("delta", {})
+                        token = delta.get("content", "")
+                        if token:
+                            yield token
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+        except Exception as e:
+            logger.error(f"LLM stream failed: {e}")
+
+    def _build_messages(
+        self,
+        user_message: str,
+        context: str = "",
+        uploaded_files: list = None,
+        cross_source_matches: list = None,
+    ) -> list:
+        """
+        构建发给 LLM 的 messages 列表（精简版）：
+        - System Prompt 固定部分（已精简）
+        - 知识源列表（仅文件名，不含完整目录）
+        - 最多 5 条跨书章节匹配
+        - RAG 上下文（截断至 2000 字）
         """
         system_content = WELDING_EXPERT_PROMPT
 
-        # --- 注入所有已学习资料的知识目录 ---
-        if uploaded_files or knowledge_catalog:
-            system_content += "\n\n## 📚 你的完整知识库（以下所有来源平等对待，排名不分先后）\n\n"
-            system_content += "### 来源0：《材料焊接原理》— 焊接理论教材，2篇9章\n"
+        # 注入知识源文件名（精简：不传完整目录）
+        if uploaded_files:
+            names = "\n".join(f"- 《{f}》" for f in uploaded_files)
+            system_content += f"\n\n## 已学习资料\n{names}\n引用时使用真实书名。"
 
-            if uploaded_files:
-                for i, fname in enumerate(uploaded_files, 1):
-                    system_content += f"### 来源{i}：《{fname}》— 用户上传的工艺资料（已全文学习）\n"
+        # 最相关章节（最多5条，摘要截断至100字）
+        if cross_source_matches:
+            system_content += "\n\n## 最匹配章节（必须优先引用）\n"
+            for m in cross_source_matches[:5]:
+                summary = m.get('summary', '')[:100]
+                kws = ', '.join(m.get('matched_keywords', [])[:6])
+                system_content += (
+                    f"- 《{m['source']}》「{m['chapter']}」"
+                    f"[相关度:{m['score']}] 关键词:{kws} 摘要:{summary}\n"
+                )
 
-            if knowledge_catalog:
-                system_content += "\n" + knowledge_catalog + "\n"
-
-            system_content += "\n**核心规则：你必须使用上述每本书的真实书名来引用它们。**\n"
-
-            if cross_source_matches:
-                system_content += "\n### 🔗 与当前问题最匹配的章节（按相关度排序，必须优先引用）\n"
-                for m in cross_source_matches[:8]:
-                    system_content += (
-                        f"- 📄《{m['source']}》「{m['chapter']}」[相关度:{m['score']}]\n"
-                        f"  匹配关键词: {', '.join(m.get('matched_keywords', [])[:8])}\n"
-                        f"  章节摘要: {m.get('summary', '')[:150]}\n"
-                    )
-                system_content += "\n⚠️ 上述匹配章节中如包含表格数据、工艺参数，必须**直接引用**到回答中，使用书籍的真实名称。\n"
-
-        # --- RAG检索上下文 ---
+        # RAG 检索内容（截断至 2000 字，原来是 3000）
         if context:
-            system_content += f"\n## 📖 从知识库全文检索到的补充内容\n{context[:3000]}\n"
+            system_content += f"\n\n## 检索到的相关内容\n{context[:2000]}"
 
-        messages = [
+        return [
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_message},
         ]
+
+    def chat_sync(self, user_message: str, context: str = "", uploaded_files: list = None,
+                  knowledge_catalog: str = "", cross_source_matches: list = None) -> Optional[str]:
+        """
+        便捷方法：发送单条消息给焊接专家（非流式）
+        knowledge_catalog 参数保留但不再注入（精简 Prompt）
+        """
+        messages = self._build_messages(
+            user_message,
+            context=context,
+            uploaded_files=uploaded_files,
+            cross_source_matches=cross_source_matches,
+        )
         return self.chat(messages)
 
 

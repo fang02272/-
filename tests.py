@@ -8,6 +8,8 @@
   python tests.py --e2e        # 仅端到端测试
   python tests.py --tokenize   # 仅Jieba分词与检索测试
   python tests.py --rag-rebuild # 仅持久化知识库RAG重建测试
+  python tests.py --cache      # 仅缓存测试
+  python tests.py --routing    # 仅回答路由测试
 
 所有测试不调用大模型API，纯本地验证
 """
@@ -363,6 +365,160 @@ def test_cross_source_search():
 
 
 # ============================================================
+# 缓存测试
+# ============================================================
+
+def test_cache():
+    """LRU + TTL 缓存测试"""
+    print(f"\n{'─'*50}")
+    print("🧪 缓存测试")
+    print(f"{'─'*50}")
+
+    from cache_service import LRUTTLCache, normalize_query
+
+    checks = []
+
+    # --- 1. 标准化测试 ---
+    a = normalize_query("焊缝裂纹？")
+    b = normalize_query("焊缝裂纹")
+    checks.append(("标准化：去标点后相同", a == b))
+
+    c = normalize_query("  热裂纹  怎么  防止  ")
+    checks.append(("标准化：压缩空白", "热裂纹 怎么 防止" == c))
+
+    # --- 2. 基本读写 ---
+    cache = LRUTTLCache(max_size=5, ttl_seconds=60)
+    cache.set("焊缝裂纹？", {"answer": "42"})
+    hit = cache.get("焊缝裂纹")   # 标准化后应命中
+    checks.append(("标准化命中", hit == {"answer": "42"}))
+
+    miss = cache.get("完全不同的问题")
+    checks.append(("未命中返回None", miss is None))
+
+    # --- 3. TTL 过期测试 ---
+    import time
+    cache_ttl = LRUTTLCache(max_size=5, ttl_seconds=0)  # TTL=0 立即过期
+    cache_ttl.set("过期测试", {"v": 1})
+    time.sleep(0.01)
+    expired = cache_ttl.get("过期测试")
+    checks.append(("TTL过期后返回None", expired is None))
+
+    # --- 4. LRU 容量淘汰 ---
+    cache_lru = LRUTTLCache(max_size=3, ttl_seconds=3600)
+    cache_lru.set("q1", 1)
+    cache_lru.set("q2", 2)
+    cache_lru.set("q3", 3)
+    cache_lru.get("q1")          # 访问 q1，使其变为最近使用
+    cache_lru.set("q4", 4)       # 触发淘汰，应淘汰 q2（最久未使用）
+    checks.append(("LRU淘汰最久未用(q2)", cache_lru.get("q2") is None))
+    checks.append(("LRU保留最近用(q1)", cache_lru.get("q1") == 1))
+
+    # --- 5. 统计 ---
+    stats = cache_lru.stats()
+    checks.append(("统计evictions>=1", stats["evictions"] >= 1))
+    checks.append(("统计hit_rate>0", stats["hit_rate"] > 0))
+
+    # --- 6. 清空 ---
+    cache_lru.set("keep", 99)
+    cleared = cache_lru.invalidate()
+    checks.append(("清空后size=0", cache_lru.stats()["size"] == 0))
+    checks.append(("清空返回数量>0", cleared > 0))
+
+    # --- 7. 知识库更新后清空（模拟）---
+    cache_inv = LRUTTLCache(max_size=10, ttl_seconds=3600)
+    cache_inv.set("问题1", {"a": 1})
+    cache_inv.set("问题2", {"a": 2})
+    cache_inv.invalidate()
+    checks.append(("模拟知识库更新后缓存清空", cache_inv.get("问题1") is None))
+
+    passed = True
+    for name, ok in checks:
+        tag = green("✓") if ok else red("✗")
+        print(f"  {tag} {name}")
+        if not ok:
+            passed = False
+
+    return passed
+
+
+# ============================================================
+# 回答路由测试
+# ============================================================
+
+def test_routing():
+    """本地/LLM 路由判断测试"""
+    print(f"\n{'─'*50}")
+    print("🧪 回答路由测试")
+    print(f"{'─'*50}")
+
+    # 直接测试 _is_local_sufficient 逻辑
+    # 用 mock result 结构测试
+    checks = []
+
+    # 模拟本地充分：有关键词 + 有内容 + 非交叉域
+    sufficient_result = {
+        "keywords": ["热裂纹", "焊缝"],
+        "is_empty": False,
+        "is_cross_domain": False,
+        "has_cross": False,
+        "sections": {
+            "science": {
+                "content": "x" * 200,  # 足够长的内容
+            }
+        },
+        "matched_categories": ["第1章 焊缝"],
+    }
+
+    # 模拟本地不充分：空匹配
+    empty_result = {
+        "keywords": [],
+        "is_empty": True,
+        "is_cross_domain": False,
+        "has_cross": False,
+        "sections": {"science": {"content": ""}},
+        "matched_categories": [],
+    }
+
+    # 模拟跨域（需要LLM）
+    cross_result = {
+        "keywords": ["弧焊机器人", "板厚"],
+        "is_empty": False,
+        "is_cross_domain": True,
+        "has_cross": True,
+        "sections": {"science": {"content": "x" * 200}},
+        "matched_categories": [],
+    }
+
+    # 导入路由函数
+    import importlib
+    import server as srv
+
+    checks.append(("本地充分→不调LLM", srv._is_local_sufficient(sufficient_result) is True))
+    checks.append(("空匹配→调LLM", srv._is_local_sufficient(empty_result) is False))
+    checks.append(("跨域→调LLM", srv._is_local_sufficient(cross_result) is False))
+
+    # 关键词不足
+    few_kw_result = {
+        "keywords": ["焊缝"],  # 只有1个关键词
+        "is_empty": False,
+        "is_cross_domain": False,
+        "has_cross": False,
+        "sections": {"science": {"content": "x" * 200}},
+        "matched_categories": ["第1章 焊缝"],
+    }
+    checks.append(("关键词<2→调LLM", srv._is_local_sufficient(few_kw_result) is False))
+
+    passed = True
+    for name, ok in checks:
+        tag = green("✓") if ok else red("✗")
+        print(f"  {tag} {name}")
+        if not ok:
+            passed = False
+
+    return passed
+
+
+# ============================================================
 # Main
 # ============================================================
 if __name__ == "__main__":
@@ -386,6 +542,12 @@ if __name__ == "__main__":
 
     if run_all or "--e2e" in sys.argv:
         results['e2e'] = test_e2e()
+
+    if run_all or "--cache" in sys.argv:
+        results['cache'] = test_cache()
+
+    if run_all or "--routing" in sys.argv:
+        results['routing'] = test_routing()
 
     # Summary
     print(f"\n{'='*50}")

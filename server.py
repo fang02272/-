@@ -18,13 +18,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
 from welding_qa_system import WeldingQASystem
 from welding_knowledge_base import KNOWLEDGE_CATEGORIES
 from knowledge_store import get_store
+from cache_service import get_cache
+from metrics_service import get_metrics
 
 logger = logging.getLogger("welding_qa.server")
 
@@ -99,7 +101,7 @@ class QueryResponse(BaseModel):
     matched_categories: List[str]
     is_cross_domain: bool
     is_empty: bool
-    model_used: str
+    model_used: str          # "llm" | "local_knowledge_base" | "cache"
     elapsed_ms: float
     content: str = ""
     sections: Dict[str, dict] = {}
@@ -107,6 +109,50 @@ class QueryResponse(BaseModel):
     tables: List[str] = []
     references: List[str] = []
     disclaimer: str = ""
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
+def _build_disclaimer(uploaded_names: list) -> str:
+    disc = "以上内容基于《材料焊接原理》(王宗杰主编, 化学工业出版社, 2024, ISBN 978-7-122-44318-2)"
+    if uploaded_names:
+        disc += f" + 已学习资料({', '.join(uploaded_names)})"
+    disc += "，由AI焊接工艺专家统一检索所有知识源后生成。"
+    return disc
+
+
+# ============================================================
+# 本地回答充分性判断
+# ============================================================
+
+def _is_local_sufficient(result: dict) -> bool:
+    """
+    判断本地知识库是否已足够回答该问题，不需要调 LLM。
+    规则：
+      - 没有命中任何关键词（空匹配）→ 本地答案也没价值，让 LLM 尝试
+      - 匹配到至少2个原书章节关键词 AND 非交叉领域 → 本地充分
+      - 匹配到上传PDF章节内容 → 本地充分（上传资料有结构化内容）
+    """
+    if result.get("is_empty"):
+        return False
+    if result.get("is_cross_domain"):
+        return False  # 跨领域问题需要 LLM 综合
+
+    book_cats = len(result.get("sections", {}).get("science", {}).get("content", ""))
+    has_external = result.get("has_cross", False) or bool(
+        result.get("sections", {}).get("science", {}).get("content", "")
+        and "📄" in result.get("sections", {}).get("science", {}).get("content", "")
+    )
+    keywords_count = len(result.get("keywords", []))
+
+    # 匹配到 ≥2 个关键词 且有科普内容 且非跨域
+    if keywords_count >= 2 and book_cats > 100:
+        return True
+    if has_external and book_cats > 50:
+        return True
+    return False
 
 
 # ============================================================
@@ -266,19 +312,33 @@ async def get_categories():
 
 @app.post("/api/query", response_model=QueryResponse)
 async def query(req: QueryRequest):
-    """主问答接口 — RAG + LLM 生成专家级回答"""
+    """主问答接口 — 缓存 → 本地路由 → RAG + LLM"""
     q = req.query.strip()
     if not q:
         raise HTTPException(status_code=400, detail="查询内容不能为空")
 
     t0 = time.perf_counter()
+    cache = get_cache()
+    metrics = get_metrics()
 
-    # --- Step 0: 注入外部知识源到匹配系统 ---
+    # -------------------------------------------------------
+    # 快速路径 1：缓存命中
+    # -------------------------------------------------------
+    cached = cache.get(q)
+    if cached is not None:
+        elapsed = (time.perf_counter() - t0) * 1000
+        cached["elapsed_ms"] = round(elapsed, 1)
+        cached["model_used"] = "cache"
+        metrics.record_request(model_used="cache", total_ms=elapsed)
+        return QueryResponse(**cached)
+
+    # -------------------------------------------------------
+    # Step 0: 注入外部知识源
+    # -------------------------------------------------------
     store = get_store()
     uploaded_files = store.list_sources()
     uploaded_names = [s["filename"] for s in uploaded_files]
 
-    # 将所有已学习PDF的关键词注入QA系统，实现统一匹配
     external_kw_list = []
     for src in uploaded_files:
         kws = store.get_keywords(src["id"])
@@ -291,28 +351,54 @@ async def query(req: QueryRequest):
         })
     qa_system.load_external_knowledge(external_kw_list)
 
-    # --- Step 1: 本地分析（现在匹配原书 + 所有已学习PDF的关键词）---
+    # -------------------------------------------------------
+    # Step 1: 本地分析（计时）
+    # -------------------------------------------------------
+    t1 = time.perf_counter()
     try:
         result = qa_system.generate_structured(q)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"知识分析出错: {str(e)}")
+    local_ms = (time.perf_counter() - t1) * 1000
 
     keywords = result.get("keywords", [])
     categories = result.get("matched_categories", [])
 
-    # --- Step 2: RAG 检索 ---
+    # -------------------------------------------------------
+    # 快速路径 2：本地知识充分，不调 LLM
+    # -------------------------------------------------------
+    if _is_local_sufficient(result):
+        model_used = "local_knowledge_base"
+        sections = result.get("sections", {})
+        if "cross_analysis" in sections:
+            sections.pop("cross_analysis")
+        content = sections.get("science", {}).get("content", "")
+        references = sections.get("sources", {}).get("primary", [])
+        elapsed = (time.perf_counter() - t0) * 1000
+        disc = _build_disclaimer(uploaded_names)
+
+        resp_data = dict(
+            query=q, keywords=keywords, matched_categories=categories,
+            is_cross_domain=result.get("is_cross_domain", False),
+            is_empty=result.get("is_empty", False),
+            model_used=model_used, elapsed_ms=round(elapsed, 1),
+            content=content, sections=sections, mermaid_blocks=[],
+            tables=[], references=references, disclaimer=disc,
+        )
+        cache.set(q, resp_data)
+        metrics.record_request(model_used="local_knowledge_base", total_ms=elapsed, local_ms=local_ms)
+        return QueryResponse(**resp_data)
+
+    # -------------------------------------------------------
+    # Step 2: RAG 检索（计时）
+    # -------------------------------------------------------
+    t2 = time.perf_counter()
     rag = _get_rag()
     rag_context = rag.build_context(q)
-
-    # 获取已学习知识源信息
-    store = get_store()
-    knowledge_catalog = store.build_knowledge_catalog()
-    uploaded_files = store.list_sources()
-    uploaded_names = [s["filename"] for s in uploaded_files]
-
-    # 跨知识源搜索匹配内容
     cross_source_matches = store.search_across_sources(q)
-    # 将匹配到的上传资料关键词加入关键词列表
+    rag_ms = (time.perf_counter() - t2) * 1000
+
+    # 补充跨书关键词
     for src in uploaded_files:
         for kw in src.get("all_keywords", []):
             if kw in q and kw not in keywords:
@@ -321,7 +407,10 @@ async def query(req: QueryRequest):
         matched_sources = list(set(m["source"] for m in cross_source_matches))
         categories = categories + [f"📄 {s}" for s in matched_sources]
 
-    # --- Step 3: LLM 生成 ---
+    # -------------------------------------------------------
+    # Step 3: LLM 生成（计时）
+    # -------------------------------------------------------
+    t3 = time.perf_counter()
     llm = _get_llm()
     llm_text = None
     if llm.available:
@@ -330,38 +419,35 @@ async def query(req: QueryRequest):
                 q,
                 context=rag_context,
                 uploaded_files=uploaded_names,
-                knowledge_catalog=knowledge_catalog,
+                knowledge_catalog="",   # 精简：不再传完整目录
                 cross_source_matches=cross_source_matches,
             )
         except Exception:
             llm_text = None
+    llm_ms = (time.perf_counter() - t3) * 1000
 
-    # --- Step 4: 构建响应 ---
+    # -------------------------------------------------------
+    # Step 4: 组装响应（计时）
+    # -------------------------------------------------------
+    t4 = time.perf_counter()
     if llm_text and len(llm_text.strip()) > 50:
-        # LLM 成功生成 → 用专家回答
         from llm_service import parse_llm_response
         parsed = parse_llm_response(llm_text, q, keywords, categories)
         model_used = llm.model
-
         sections = {
             "expert_analysis": {
-                "title": "🔍 专家分析",
-                "icon": "🔍",
-                "content": llm_text,
-                "visible": True,
+                "title": "🔍 专家分析", "icon": "🔍",
+                "content": llm_text, "visible": True,
             },
             "recommendations": {
-                "title": "📋 延伸建议",
-                "icon": "📋",
+                "title": "📋 延伸建议", "icon": "📋",
                 "items": result.get("sections", {}).get("recommendations", {}).get("items", []),
                 "visible": True,
             },
             "sources": {
-                "title": "📚 参考来源",
-                "icon": "📚",
+                "title": "📚 参考来源", "icon": "📚",
                 "primary": parsed.get("references", []) or result.get("sections", {}).get("sources", {}).get("primary", []),
-                "extended": [],
-                "visible": True,
+                "extended": [], "visible": True,
             },
         }
         mermaid_blocks = parsed.get("mermaid_blocks", [])
@@ -369,10 +455,8 @@ async def query(req: QueryRequest):
         references = parsed.get("references", [])
         content = llm_text
     else:
-        # LLM 不可用或失败 → 降级为本地知识库模式
         model_used = "local_knowledge_base"
         sections = result.get("sections", {})
-        # 移除交叉分析(本地模式无此需求)
         if "cross_analysis" in sections:
             sections.pop("cross_analysis")
         mermaid_blocks = []
@@ -380,28 +464,125 @@ async def query(req: QueryRequest):
         references = sections.get("sources", {}).get("primary", [])
         content = sections.get("science", {}).get("content", "")
 
+    assembly_ms = (time.perf_counter() - t4) * 1000
     elapsed = (time.perf_counter() - t0) * 1000
+    disc = _build_disclaimer(uploaded_names)
 
-    disc = "以上内容基于《材料焊接原理》(王宗杰主编, 化学工业出版社, 2024, ISBN 978-7-122-44318-2)"
-    if uploaded_names:
-        disc += f" + 已学习资料({', '.join(uploaded_names)})"
-    disc += "，由AI焊接工艺专家统一检索所有知识源后生成。"
-
-    return QueryResponse(
-        query=q,
-        keywords=keywords,
-        matched_categories=categories,
+    resp_data = dict(
+        query=q, keywords=keywords, matched_categories=categories,
         is_cross_domain=result.get("is_cross_domain", False),
         is_empty=result.get("is_empty", False),
-        model_used=model_used,
-        elapsed_ms=round(elapsed, 1),
-        content=content,
-        sections=sections,
-        mermaid_blocks=mermaid_blocks,
-        tables=tables,
-        references=references,
-        disclaimer=disc,
+        model_used=model_used, elapsed_ms=round(elapsed, 1),
+        content=content, sections=sections, mermaid_blocks=mermaid_blocks,
+        tables=tables, references=references, disclaimer=disc,
     )
+
+    # 写缓存（LLM 成功才缓存，本地降级不缓存）
+    if model_used != "local_knowledge_base":
+        cache.set(q, resp_data)
+
+    metrics.record_request(
+        model_used=model_used, total_ms=elapsed,
+        local_ms=local_ms, rag_ms=rag_ms,
+        llm_ms=llm_ms, assembly_ms=assembly_ms,
+    )
+    return QueryResponse(**resp_data)
+
+
+# ============================================================
+# 流式问答接口 (SSE)
+# ============================================================
+
+@app.post("/api/query/stream")
+async def query_stream(req: QueryRequest):
+    """
+    流式问答 — Server-Sent Events
+    前端用 EventSource 或 fetch + ReadableStream 接收
+    每个 SSE 事件格式: data: <json>\\n\\n
+      - type="token"   → {"token": "..."}
+      - type="done"    → {"model_used": "...", "elapsed_ms": ...}
+      - type="error"   → {"message": "..."}
+    """
+    q = req.query.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="查询内容不能为空")
+
+    import json as _json
+
+    async def event_generator():
+        t0 = time.perf_counter()
+        cache = get_cache()
+        metrics = get_metrics()
+        ttft_ms = None
+
+        # 缓存命中 → 直接推送完整内容
+        cached = cache.get(q)
+        if cached is not None:
+            elapsed = (time.perf_counter() - t0) * 1000
+            yield f"data: {_json.dumps({'type': 'token', 'token': cached.get('content', '')}, ensure_ascii=False)}\n\n"
+            yield f"data: {_json.dumps({'type': 'done', 'model_used': 'cache', 'elapsed_ms': round(elapsed, 1)}, ensure_ascii=False)}\n\n"
+            metrics.record_request(model_used="cache", total_ms=elapsed, ttft_ms=0)
+            return
+
+        # 准备知识源
+        store = get_store()
+        uploaded_files = store.list_sources()
+        uploaded_names = [s["filename"] for s in uploaded_files]
+        external_kw_list = [
+            {"filename": s["filename"],
+             "keywords": store.get_keywords(s["id"]),
+             "chapters": [{"title": c["title"], "summary": c.get("summary", ""), "keywords": c.get("keywords", [])}
+                          for c in store.get_chapters(s["id"])]}
+            for s in uploaded_files
+        ]
+        qa_system.load_external_knowledge(external_kw_list)
+        result = qa_system.generate_structured(q)
+        rag_context = _get_rag().build_context(q)
+        cross_source_matches = store.search_across_sources(q)
+
+        llm = _get_llm()
+        if not llm.available:
+            # 降级：推送本地内容
+            content = result.get("sections", {}).get("science", {}).get("content", "本地模式，LLM 未配置")
+            elapsed = (time.perf_counter() - t0) * 1000
+            yield f"data: {_json.dumps({'type': 'token', 'token': content}, ensure_ascii=False)}\n\n"
+            yield f"data: {_json.dumps({'type': 'done', 'model_used': 'local_knowledge_base', 'elapsed_ms': round(elapsed, 1)}, ensure_ascii=False)}\n\n"
+            metrics.record_request(model_used="local_knowledge_base", total_ms=elapsed)
+            return
+
+        # 流式调用 LLM
+        messages = llm._build_messages(q, context=rag_context, uploaded_files=uploaded_names,
+                                       cross_source_matches=cross_source_matches)
+        full_content = []
+        try:
+            for token in llm.chat_stream(messages):
+                if ttft_ms is None:
+                    ttft_ms = (time.perf_counter() - t0) * 1000
+                full_content.append(token)
+                yield f"data: {_json.dumps({'type': 'token', 'token': token}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+            return
+
+        elapsed = (time.perf_counter() - t0) * 1000
+        full_text = "".join(full_content)
+
+        # 写缓存
+        if len(full_text) > 50:
+            cache.set(q, dict(
+                query=q, keywords=result.get("keywords", []),
+                matched_categories=result.get("matched_categories", []),
+                is_cross_domain=result.get("is_cross_domain", False),
+                is_empty=result.get("is_empty", False),
+                model_used=llm.model, elapsed_ms=round(elapsed, 1),
+                content=full_text, sections={}, mermaid_blocks=[],
+                tables=[], references=[], disclaimer=_build_disclaimer(uploaded_names),
+            ))
+
+        metrics.record_request(model_used="llm", total_ms=elapsed, ttft_ms=ttft_ms)
+        yield f"data: {_json.dumps({'type': 'done', 'model_used': llm.model, 'elapsed_ms': round(elapsed, 1)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # ============================================================
@@ -451,6 +632,7 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
     # 统一从持久化知识库重建，避免全文和章节重复入索引。
     index_stats = rag.rebuild_from_store(store)
     app.state.rag_index_stats = index_stats
+    get_cache().invalidate()  # 知识库更新 → 清空缓存
 
     return {
         "total": len(files),
@@ -494,6 +676,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         rag = _get_rag()
         index_stats = rag.rebuild_from_store(store)
         app.state.rag_index_stats = index_stats
+        get_cache().invalidate()  # 知识库更新 → 清空缓存
 
         catalog = store.build_knowledge_catalog()
         source_info = store.get_source(source_id)
@@ -547,7 +730,7 @@ async def delete_upload(filename: str):
     rag = _get_rag()
     index_stats = rag.rebuild_from_store(store)
     app.state.rag_index_stats = index_stats
-
+    get_cache().invalidate()  # 知识库更新 → 清空缓存
     return {"status": "ok", "message": f"已删除 {filename}，知识库已更新", "rag_index": index_stats}
 
 
@@ -564,7 +747,40 @@ async def clear_all_uploads():
     rag = _get_rag()
     index_stats = rag.rebuild_from_store(store)
     app.state.rag_index_stats = index_stats
+    get_cache().invalidate()  # 知识库更新 → 清空缓存
     return {"status": "ok", "message": "所有上传文件已清除", "rag_index": index_stats}
+
+
+# ============================================================
+# 监控与缓存管理接口
+# ============================================================
+
+@app.get("/api/metrics")
+async def get_metrics_api():
+    """返回性能统计：响应时间、LLM调用率、缓存命中率、TTFT"""
+    m = get_metrics().snapshot()
+    c = get_cache().stats()
+    return {"performance": m, "cache": c}
+
+
+@app.post("/api/metrics/reset")
+async def reset_metrics():
+    """重置性能统计数据（不清缓存）"""
+    get_metrics().reset()
+    return {"status": "ok", "message": "性能统计已重置"}
+
+
+@app.get("/api/cache/stats")
+async def cache_stats():
+    """缓存状态详情"""
+    return get_cache().stats()
+
+
+@app.post("/api/cache/invalidate")
+async def invalidate_cache():
+    """手动清空缓存"""
+    count = get_cache().invalidate()
+    return {"status": "ok", "cleared": count}
 
 
 # ============================================================
