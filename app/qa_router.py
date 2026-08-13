@@ -119,6 +119,9 @@ class QARouter:
     def extract_params(self, query: str) -> Dict:
         """抽取材料/板厚/工艺/焊材/参数词（内部思考第一步产物）"""
         materials = []
+        # 管道/管材检测（机器人高频场景：钢管/管道对接）
+        if any(k in query for k in ("管道", "管对接", "圆管", "钢管", "管")):
+            materials.append("钢管")
         for m in _MATERIAL_NAMES:
             if m in query and m not in materials:
                 materials.append(m)
