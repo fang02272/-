@@ -652,6 +652,38 @@ function renderProcessCard(c){
   rpCells.forEach(([k,v])=>{ if(v)h+=`<div style="background:var(--surface-tertiary);padding:8px 10px;border-radius:8px;font-size:12px"><div style="color:var(--text-tertiary);font-size:11px">${k}</div><b>${escH(v)}</b></div>`; });
   h+='</div>';
 
+  // 机器人焊接详情（焊丝/气体/TCP/枪姿态/船型焊/层道/管道）
+  const rb=c.robot||{};
+  if(rb.wire||rb.pass_sequence){
+    h+=`<h3 style="margin-top:16px">🦾 机器人焊接方案</h3>`;
+    // 焊丝 + 气体
+    h+=`<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">`;
+    if(rb.weld_mode)h+=`<span style="background:var(--info-bg);padding:4px 10px;border-radius:20px;font-size:12px">🛠 ${escH(rb.weld_mode)}</span>`;
+    if(rb.wire&&rb.wire.type)h+=`<span style="background:var(--surface-tertiary);padding:4px 10px;border-radius:20px;font-size:12px">🧵 焊丝 ${escH(rb.wire.type)} ${escH(rb.wire.diameter||'')}</span>`;
+    if(rb.gas&&rb.gas.type)h+=`<span style="background:var(--surface-tertiary);padding:4px 10px;border-radius:20px;font-size:12px">💨 ${escH(rb.gas.type)} ${escH(rb.gas.flow||'')}</span>`;
+    h+='</div>';
+    // TCP + 枪姿态 + 船型焊
+    if(rb.tcp)h+=`<div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">📐 TCP: ${escH(rb.tcp.contact_tip_to_work||'')} / ${escH(rb.tcp.stick_out||'')}</div>`;
+    if(rb.gun_pose)h+=`<div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px">🔫 姿态: 工作角${escH(rb.gun_pose.work_angle||'')} | 行走角${escH(rb.gun_pose.travel_angle||'')}</div>`;
+    if(rb.ship_position)h+=`<div style="font-size:12px;color:var(--success);margin-bottom:8px">🚢 船型焊: ${escH(rb.ship_position.position)} — ${escH(rb.ship_position.angle||'')}</div>`;
+    // 层道序列表
+    if(rb.pass_sequence&&rb.pass_sequence.length){
+      h+=`<div class="md-table-wrap"><table><thead><tr><th>焊道</th><th>层</th><th>道</th><th>电流</th><th>电压</th><th>焊速</th><th>送丝</th><th>焊宽</th></tr></thead><tbody>`;
+      rb.pass_sequence.forEach(p=>{
+        h+=`<tr><td>${escH(p.pass||'')}</td><td>${escH(p.layer||'')}</td><td>${escH(p.bead||'')}</td><td>${escH(p.current_a||'')}</td><td>${escH(p.voltage_v||'')}</td><td>${escH(p.speed_cm_min||'')}</td><td>${escH(p.wire_feed||'')}</td><td>${escH(p.bead_width||'')}</td></tr>`;
+      });
+      h+='</tbody></table></div>';
+    }
+    // 管道策略
+    const pipe=rb.pipe||{};
+    if(pipe.pipe_mode){
+      h+=`<div style="margin-top:8px;padding:10px;background:var(--purple-bg);border-radius:8px;font-size:12px;color:var(--purple)">`;
+      h+=`<div>🛢 管道: ${escH(pipe.pipe_mode)} — ${escH(pipe.strategy||'')}</div>`;
+      if(pipe['6G_note'])h+=`<div style="margin-top:4px">🔹 ${escH(pipe['6G_note'])}</div>`;
+      h+='</div>';
+    }
+  }
+
   // 焊接参数表
   h+=`<h3 style="margin-top:16px">⚙️ 焊接参数</h3>`;
   h+=`<div class="md-table-wrap"><table><thead><tr><th>参数</th><th>建议值</th></tr></thead><tbody>`;

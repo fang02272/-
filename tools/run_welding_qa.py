@@ -72,6 +72,29 @@ def print_card(c: dict):
         if v:
             print(f"  {k}: {v}")
 
+    # 机器人焊接方案（焊丝/TCP/枪姿态/船型焊/层道/管道）
+    rb = c.get("robot", {}) or {}
+    if rb.get("wire") or rb.get("pass_sequence"):
+        print(f"\n🦾 机器人焊接方案")
+        if rb.get("weld_mode"):
+            print(f"  模式: {rb['weld_mode']}")
+        if rb.get("wire"):
+            print(f"  焊丝: {rb['wire'].get('type','')} {rb['wire'].get('diameter','')}")
+        if rb.get("gas"):
+            print(f"  保护气: {rb['gas'].get('type','')} {rb['gas'].get('flow','')}")
+        if rb.get("tcp"):
+            print(f"  TCP: {rb['tcp'].get('contact_tip_to_work','')} / 干伸长{rb['tcp'].get('stick_out','')}")
+        if rb.get("gun_pose"):
+            print(f"  枪姿态: 工作角{rb['gun_pose'].get('work_angle','')} | 行走角{rb['gun_pose'].get('travel_angle','')}")
+        if rb.get("ship_position"):
+            print(f"  船型焊: {rb['ship_position'].get('position','')} — {rb['ship_position'].get('angle','')}")
+        for p in rb.get("pass_sequence", []):
+            print(f"  · {p.get('pass','')}: {p.get('current_a','')} / {p.get('voltage_v','')} / "
+                  f"{p.get('speed_cm_min','')}cm/min / 宽{p.get('bead_width','')}")
+        pipe = rb.get("pipe", {})
+        if pipe.get("pipe_mode"):
+            print(f"  管道: {pipe.get('pipe_mode')} — {pipe.get('strategy','')[:40]}")
+
     print(f"\n📋 工艺方案")
     print(f"  坡口: {c.get('groove','')}")
     print(f"  装配间隙: {c.get('joint_gap_mm','')}")

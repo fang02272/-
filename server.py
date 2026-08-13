@@ -736,7 +736,7 @@ def process_query(q: str) -> dict:
     if intent in (QueryIntent.PARAMETER, QueryIntent.MIXED):
         plan["param_match"] = _get_router().match_parameters(
             plan["extracted"], q, expert_kb=_get_expert_kb(), vector_hits=vector_hits)
-        plan["process_card"] = build_process_card(plan["extracted"], plan["param_match"])
+        plan["process_card"] = build_process_card(plan["extracted"], plan["param_match"], q)
 
     conf = _get_router().confidence(intent, plan["extracted"], concept, _routing_cfg)
     plan["confidence"] = conf

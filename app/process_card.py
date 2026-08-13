@@ -20,6 +20,12 @@ except ImportError:
     MATERIAL_PARAM_MAP = {}
     ELECTRODE_PARAM_TABLE = {}
 
+try:
+    from app.robot_welding import build_robot_block, ROBOT_DEFAULT_PROCESS
+except ImportError:
+    build_robot_block = None
+    ROBOT_DEFAULT_PROCESS = "GMAW/MIG (熔化极氩弧焊)"
+
 
 # ============================================================
 # 规则知识库
@@ -192,7 +198,7 @@ def _material_params(material_key: str) -> dict:
     return MATERIAL_PARAM_MAP.get(material_key, {}) or {}
 
 
-def build_process_card(extracted: dict, param_match: dict) -> Optional[dict]:
+def build_process_card(extracted: dict, param_match: dict, query: str = "") -> Optional[dict]:
     """由 意图抽取 + 参数匹配 结果构建结构化工艺卡片。
     返回机器可读 dict；数据不足时返回 None（调用方回退到常规回答）。"""
     if not param_match or not param_match.get("matched"):
@@ -202,9 +208,9 @@ def build_process_card(extracted: dict, param_match: dict) -> Optional[dict]:
     material = param_match.get("material") or (extracted.get("materials") or [None])[0]
     process = param_match.get("process")
     process_assumed = False
-    # 工艺缺省：有材料/板厚但未指定工艺时，默认 焊条电弧焊（机器人焊接基线），并标注 assumed
+    # 工艺缺省：有材料/板厚但未指定工艺时，默认 GMAW/MIG（机器人焊接基线），并标注 assumed
     if not process and (thickness is not None or material):
-        process = "SMAW (焊条电弧焊)"
+        process = ROBOT_DEFAULT_PROCESS
         process_assumed = True
     electrode = param_match.get("electrode")
     mp = _material_params(material) if material else {}
@@ -282,8 +288,23 @@ def build_process_card(extracted: dict, param_match: dict) -> Optional[dict]:
             "inspection": "外观检验（咬边/裂纹/焊瘤）+ 按需无损检测（RT/UT/PT）",
         },
         "equipment": _load_equipment(),
+        "robot": _build_robot_field(material, thickness, process, query),
         "application": param_match.get("application", ""),
     }
+
+
+def _build_robot_field(material, thickness, process, query_text: str = ""):
+    """构建机器人焊接字段（robot block）：焊丝/TCP/枪姿态/船型焊/层道/管道策略"""
+    if build_robot_block is None:
+        return {}
+    try:
+        # 管道/圆弧检测（从用户查询原文）
+        query_text = query_text or ""
+        is_pipe = any(k in query_text for k in ("管道", "管", "圆弧", "圆管", "固定管", "6G", "5G", "45°管"))
+        pipe_fixed = not any(k in query_text for k in ("旋转", "滚轮", "转动"))
+        return build_robot_block(material, thickness, process, is_pipe, pipe_fixed)
+    except Exception:
+        return {}
 
 
 def _load_equipment() -> dict:
