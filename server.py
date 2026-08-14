@@ -336,6 +336,28 @@ def _assemble_card_sections(plan: dict, result: dict) -> dict:
     return sections
 
 
+def _payload_is_valid(payload: dict) -> bool:
+    """判断 payload 是否有实际内容（避免缓存/返回空答案）"""
+    if not payload:
+        return False
+    if payload.get("content") and len(str(payload.get("content")).strip()) >= 30:
+        return True
+    secs = payload.get("sections") or {}
+    for sec in secs.values():
+        if not isinstance(sec, dict):
+            continue
+        if sec.get("content") and len(str(sec.get("content")).strip()) >= 30:
+            return True
+        if sec.get("items"):
+            return True
+        if sec.get("primary"):
+            return True
+    # process_card 也是有效输出
+    if payload.get("process_card"):
+        return True
+    return False
+
+
 def _assemble_local_payload(plan: dict, result: dict, q: str, t0) -> dict:
     """按意图组装本地负载。content 必须为空，前端才走 sections 渲染。"""
     intent = plan["intent"]
@@ -747,7 +769,8 @@ def process_query(q: str) -> dict:
 
     # --- Step 7: 本地匹配优先 — 高置信 或 工艺卡片就绪 → 直接返回，跳过 LLM ---
     if intent != QueryIntent.OTHER and (conf >= local_high or plan.get("process_card")):
-        _get_cache().put(q, local_payload, fp)
+        if _payload_is_valid(local_payload):
+            _get_cache().put(q, local_payload, fp)
         return local_payload
 
     # --- Step 8: LLM 兜底（意图感知 + 瘦身上下文） ---
@@ -777,7 +800,9 @@ def process_query(q: str) -> dict:
         payload = local_payload
         payload["model_used"] = "local_knowledge_base"
 
-    _get_cache().put(q, payload, fp)
+    # 空答案不缓存（避免缓存"0字空回复"导致永远命中空答案）
+    if _payload_is_valid(payload):
+        _get_cache().put(q, payload, fp)
     return payload
 
 
