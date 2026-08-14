@@ -16,6 +16,10 @@
 
 ## v2.6 新增能力
 
+- **机器人焊接能力**（本周核心）：默认工艺 SMAW→**GMAW/MIG**，新增 `robot_welding.py` 规则库（焊丝选型 ER50-6/ER308L、保护气配比、TCP/导电嘴、枪姿态分解、船型焊 PA、层道电流电压序列、管道 6G 半圈分段）
+- **专家库概念质量全量达标**：123 概念 **0 无定义 / 0 应用缺失**（手工定义表覆盖专业词/缩写/衍生概念，手工应用表覆盖 40+ 常见术语）
+- **概念解析质量**：滑动窗口主题提取（修复"氩弧焊被埋弧焊抢答"）、OCR 乱码过滤、来源相关度排序
+- **健壮性修复**：空答案不缓存（避免命中 0 字空回复）、参考来源提取加固（剔除 markdown 标记/过滤残缺片段/截断到书名号闭合）
 - **词库扩充**：关键词库 1173→**1317**，同义词组 106→**123**（电弧物理/冶金/凝固/相变/牌号/裂纹/热循环/HAZ/氢/冷裂/强韧性/微观/异种界面/表面改性/活性钎焊/中间层/扩散焊/成形/NDT/位置/接头）
 - **jieba 智能分词**：注册焊接术语高频防误切 + 搜索模式多粒度切分（`焊接热影响区/冷裂纹/预热温度` 保持完整词）
 - **六阶段关键词提取**：繁简/上下标归一化 → 数值参数 → 子串+ngram+去标点 → 长术语吞并 → 双向别名扩展 → 噪声过滤（`SCC`→应力腐蚀开裂、`鋁`→铝、`焊条电弧焊`→SMAW）
@@ -44,6 +48,8 @@
 | `knowledge_store.py`（导入端） | 表格关键词并入、表格并入章节、`_WELDING_CHARS` 动态特征字、`relearn_keywords` |
 | git 分支 `feature/replace-ngram-with-jieba-tokenization` | **jieba 分词**（替代纯 n-gram）：注册焊接术语高频防误切 + `cut_for_search` 多粒度 |
 | `stop_words.json`（参考） | 外部化停用词表（144 词）|
+| 机器人焊接需求（卡诺普场景） | **`robot_welding.py`**：焊丝选型/送丝/TCP/枪姿态/船型焊/层道序列/管道6G（机器人工艺卡片）|
+| 汇报 PPT | **`gen_report_ppt.py`**：真表格/柱状图/架构图生成汇报幻灯片 |
 
 ---
 
@@ -62,9 +68,10 @@ PyCharmMiscProject/
 │   ├── pdf_parser.py            #   PDF解析：文本/表格/图片 + PaddleOCR扫描件
 │   ├── rag_retriever.py         #   RAG检索（兜底）：TF-IDF + 余弦相似度
 │   ├── vector_store.py          #   本地向量库：numpy特征向量 + 增量索引
-│   ├── expert_knowledge_base.py #   专家基座：概念→解析/应用/工艺类型/来源
-│   ├── qa_router.py             #   意图路由：概念/参数判定 + 参数匹配
+│   ├── expert_knowledge_base.py #   专家基座：概念→解析/应用/工艺类型/来源 + 手工定义表
+│   ├── qa_router.py             #   意图路由：概念/参数判定 + 参数匹配 + 管道识别
 │   ├── process_card.py          #   工艺卡片：结构化/机器可读 + 机器人参数 + 装备
+│   ├── robot_welding.py         #   机器人焊接规则库：焊丝/送丝/TCP/枪姿态/船型焊/层道/管道
 │   ├── answer_cache.py          #   结果缓存：LRU+TTL+相似度命中
 │   ├── stop_words.json          #   外部停用词表（可调优）
 │
@@ -78,9 +85,11 @@ PyCharmMiscProject/
 │   ├── inspect_knowledge.py     #   知识库自检（不调LLM）
 │   ├── relearn_book.py          #   重新学习指定手册
 │   ├── reocr_handbook.py        #   GPU 重跑手册 OCR
-│   ├── gpu_ingest.py            #   GPU 新书入库（OCR→学习→索引，一条命令）
+│   ├── relearn_tables.py        #   表格重建（定向OCR候选页→结构化表格）
+│   ├── gpu_ingest.py            #   GPU 新书入库（OCR→表格重建→学习→索引，一条命令）
 │   ├── run_welding_qa.py        #   命令行问答（参数问题输出工艺卡片）
-│   └── tests.py                 #   测试用例
+│   ├── gen_report_ppt.py        #   汇报PPT生成脚本（真表格/图表/架构图）
+│   └── tests.py                 #   测试用例（含 jieba 分词测试）
 │
 ├── static/
 │   └── index.html               # 【前端UI】聊天界面 + Markdown/Mermaid渲染 + PDF上传
@@ -138,28 +147,40 @@ PyCharmMiscProject/
 
 参数问题（材料+板厚+工艺）会输出**机器可读的工艺卡片 JSON**，供智能引擎、仿真、机器人路径规划与操控直接使用，**减少示教时间**。
 
-### 卡片结构示例
+### 卡片结构示例（默认机器人工艺 GMAW/MIG）
 ```json
 {
-  "base_material": "低碳钢", "thickness_mm": 12, "process": "SMAW (焊条电弧焊)",
+  "base_material": "低碳钢", "thickness_mm": 12, "process": "GMAW/MIG (熔化极氩弧焊)",
   "groove": "单V坡口 60°±5°（钝边1-2mm）", "joint_gap_mm": "2-3mm",
   "electrical": {"current_a": "90-140A", "voltage_v": "20-36V", "travel_speed_cm_min": "5-40 cm/min"},
   "thermal": {"preheat": "板厚<30mm: 不需预热", "interpass_temp": "≤250°C", "postheat": "一般不需要"},
-  "shielding_gas": "焊条药皮造渣+造气",
-  "pass_plan": {"layers_passes": "2层（打底+盖面）", "weaving": "锯齿形运条，摆动宽度≤9.6mm"},
-  "robot_params": {"travel_speed": "5-40 cm/min", "gun_angle": "70-80°", "stick_out": "焊条干伸长15-20mm",
-                   "weave_width": "锯齿形运条≤9.6mm", "weave_frequency": "0.5-1.0 Hz"},
-  "quality": {"checks": [{"defect": "烧穿", "cause": "电流过大", "prevention": "控制电流..."}], "inspection": "..."},
+  "robot": {
+    "weld_mode": "MAG 富氩混合气",
+    "wire": {"type": "ER50-6", "diameter": "1.2mm"},
+    "gas": {"type": "80%Ar+20%CO₂", "flow": "15-20 L/min"},
+    "tcp": {"contact_tip_to_work": "12-15mm", "stick_out": "15-18mm", "approach": "TCP指向坡口中心"},
+    "gun_pose": {"work_angle": "75-85°", "travel_angle": "10-15°推枪", "axis_rotation": "0°"},
+    "ship_position": {"position": "PA/1G 船型焊", "angle": "坡口旋转至45°朝上"},
+    "pass_sequence": [
+      {"pass": "打底", "current_a": "120-140A", "voltage_v": "18-20V", "speed_cm_min": "25-35", "wire_feed": "6-8 m/min", "bead_width": "4-5mm"},
+      {"pass": "填充", "current_a": "160-190A", "voltage_v": "21-24V", "speed_cm_min": "28-35", "wire_feed": "7-9 m/min", "bead_width": "6-7mm"},
+      {"pass": "盖面", "current_a": "180-210A", "voltage_v": "23-25V", "speed_cm_min": "25-30", "wire_feed": "8-10 m/min", "bead_width": "7-9mm"}
+    ],
+    "pipe": {"pipe_mode": "管道固定焊", "strategy": "6点→12点半圈分段", "6G_note": "每半圈含斜仰/斜立/斜平"}
+  },
+  "quality": {"checks": [{"defect": "气孔", "cause": "保护气不足", "prevention": "控制气体流量15-20L/min"}], "inspection": "..."},
   "equipment": {"robot_model": "MR2010_1", "torch_model": "APW50N", "welder_model": "NBC-500RP", "work_area_m2": 6},
   "application": "..."
 }
 ```
 
 ### 关键特性
-- **确定性输出**：电参数/热参数取自基座三表（工艺/材料/焊条参数表），坡口/间隙/焊道/机器人参数由规则生成，不依赖 LLM 随机性 —— 适合机器人控制
+- **机器人焊接字段**（`robot` 块）：焊丝选型（按母材 ER50-6/ER308L）、保护气配比、送丝速度、TCP/导电嘴、枪姿态分解（工作角/行走角/绕枪轴）、船型焊位置、层道电流电压序列、管道 6G 半圈分段
+- **默认工艺 GMAW/MIG**：面向机器人焊丝工艺（非手工焊条），管道/圆弧场景自动识别
+- **确定性输出**：电参数/热参数取自基座三表（工艺/材料/焊条参数表）+ `robot_welding.py` 规则库，不依赖 LLM 随机性 —— 适合机器人控制
 - **装备信息**：机器人型号、焊枪、焊机、作业幅宽在 `app/config.yaml` 的 `equipment` 段配置
 - **推理隐藏**：意图解析、工艺匹配等思考过程不展示，前端只显示工艺卡片
-- **JSON 导出**：Web 端卡片带「复制JSON」按钮；命令行 `tools/run_welding_qa.py` 直接打印卡片
+- **JSON 导出 / 打印PDF**：Web 端卡片带「复制JSON」「打印/导出PDF」按钮；命令行 `tools/run_welding_qa.py` 直接打印卡片
 
 ### 机器人参数（可后续按实机标定）
 | 工艺 | 焊枪倾角 | 干伸长 |
@@ -272,12 +293,16 @@ http://localhost:8000/api/knowledge/inspect?q=焊接参数
 ## 演进路线图
 
 ### 当前 (v2.6) — 完成
+- [x] **机器人焊接能力**：默认工艺 GMAW/MIG、机器人规则库（焊丝/送丝/TCP/枪姿态/船型焊/层道/管道6G）
+- [x] **专家库概念质量全量达标**：123 概念 0 无定义 / 0 应用缺失（手工定义+手工应用表）
+- [x] **概念解析质量**：滑动窗口主题提取、乱码过滤、来源排序
+- [x] **健壮性修复**：空答案不缓存、参考来源截断加固
 - [x] 词库扩充（1317 关键词 / 123 同义词组）+ 六阶段关键词提取
 - [x] jieba 智能分词（焊接术语高频注册 + 搜索模式多粒度）
 - [x] 表格重建 + 并入章节正文（扫描版定向 OCR 恢复结构化数据）
 - [x] 专家知识库（123 概念）+ 本地向量库（numpy 余弦 + jieba）
 - [x] 意图路由：概念 ↔ 工艺参数差异化回答
-- [x] **工艺卡片**：机器可读 JSON + 机器人参数 + 装备信息（仿真/机器人用）
+- [x] **工艺卡片**：机器可读 JSON + 机器人字段 + 装备信息（仿真/机器人用）
 - [x] 本地匹配优先 + 结果缓存（LRU+TTL+相似度）
 - [x] GPU OCR（PaddleOCR + cv2 预处理 + 纠错字典）+ 前端 GPU 上传
 - [x] 命令行工艺卡片（run_welding_qa.py 与 Web 共用引擎）
