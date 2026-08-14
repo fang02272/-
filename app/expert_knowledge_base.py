@@ -61,6 +61,16 @@ MANUAL_DEFINITIONS = {
         "application": "用于功率电子封装（DBC 铜基板）、陶瓷与金属密封件、传感器等；活性钎焊温度通常 850-950°C，需真空或保护气氛。",
         "process_types": ["钎焊"],
     },
+    "氩弧焊": {
+        "definition": "氩弧焊是以氩气作为保护气体的电弧焊方法，分钨极氩弧焊（GTAW/TIG，电极不熔化）和熔化极氩弧焊（GMAW/MIG，焊丝熔化并填充）。氩气化学性质稳定，能有效隔离空气、防止焊缝氧化，故成形好、无飞溅，尤其适合有色金属、不锈钢及薄板焊接。",
+        "application": "应用要点：氩弧焊（GTAW/TIG）用钨极+氩气保护，成形好、无飞溅，适合薄板/有色金属/根部打底焊；机器人焊接中常用于管道打底、不锈钢薄板；注意钨极烧损、控制气体流量10-15L/min。",
+        "process_types": ["GTAW/TIG (钨极氩弧焊)", "GMAW/MIG (熔化极氩弧焊)"],
+    },
+    "埋弧焊": {
+        "definition": "埋弧焊（SAW）：电弧在颗粒状焊剂层下燃烧，焊丝连续送进并熔化，熔渣覆盖熔池起到保护与保温作用。熔深大、熔敷效率高（95-99%）、无弧光辐射，适合中厚板长焊缝，广泛用于压力容器、船舶、管道纵缝。",
+        "application": "应用要点：埋弧焊适合厚板/长直缝，自动化程度高，机器人常配变位机实现自动埋弧焊；注意焊剂干燥、焊丝对中、控制线能量。",
+        "process_types": ["SAW (埋弧自动焊)"],
+    },
 }
 
 # ============================================================
@@ -303,26 +313,26 @@ class ExpertKnowledgeBase:
                     parts.append(f"### {sec_title}\n{sec}")
                 return "\n\n".join([p for p in parts if p])
 
-        # 2) 章节内容匹配：找 canonical 本身出现最多的章（避免被同章其他术语抢走），提取上下文
+        # 2) 章节摘要命中：用清洗后的章节摘要作为定义（干净，不抓 OCR 原文段落）
         terms = [t for t in all_terms if len(str(t)) >= 2]
         best = None  # (count, src_name, chapter)
         for src_name, chs in chapters_by_source.items():
             for ch in chs:
                 if self._is_noise_title(ch.get("title", "")):
                     continue
-                content = ch.get("content", "") or ""
-                if self._is_garbled(content):
+                summary = ch.get("summary", "") or ""
+                if self._is_garbled(summary):
                     continue
+                content = ch.get("content", "") or ""
                 # 优先 canonical 精确计数；canonical 不出现才用 aliases
                 count = content.count(str(canonical))
                 if count == 0:
                     count = sum(content.count(str(t)) for t in terms if t != str(canonical))
                 if count > 0 and (best is None or count > best[0]):
-                    best = (count, src_name, ch)
+                    best = (count, src_name, ch, summary)
         if best:
-            count, src_name, ch = best
-            snippet = self._extract_context(ch.get("content", "") or "", canonical, terms)
-            return f"据《{src_name}》「{ch.get('title','')}」：{snippet}"
+            count, src_name, ch, summary = best
+            return f"据《{src_name}》「{ch.get('title','')}」：{summary}"
 
         # 3) 章节关键词/摘要命中（内容未命中时回退）
         hits = []
