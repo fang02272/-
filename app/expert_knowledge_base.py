@@ -195,7 +195,7 @@ class ExpertKnowledgeBase:
                     parts.append(f"### {sec_title}\n{sec}")
                 return "\n\n".join([p for p in parts if p])
 
-        # 2) 章节内容匹配：找 canonical 在内容中出现最多的一章，提取上下文作为定义
+        # 2) 章节内容匹配：找 canonical 本身出现最多的章（避免被同章其他术语抢走），提取上下文
         terms = [t for t in all_terms if len(str(t)) >= 2]
         best = None  # (count, src_name, chapter)
         for src_name, chs in chapters_by_source.items():
@@ -203,7 +203,12 @@ class ExpertKnowledgeBase:
                 if self._is_noise_title(ch.get("title", "")):
                     continue
                 content = ch.get("content", "") or ""
-                count = sum(content.count(str(t)) for t in terms)
+                if self._is_garbled(content):
+                    continue
+                # 优先 canonical 精确计数；canonical 不出现才用 aliases
+                count = content.count(str(canonical))
+                if count == 0:
+                    count = sum(content.count(str(t)) for t in terms if t != str(canonical))
                 if count > 0 and (best is None or count > best[0]):
                     best = (count, src_name, ch)
         if best:
@@ -239,13 +244,39 @@ class ExpertKnowledgeBase:
         return "（暂无该概念的权威定义，可参阅《材料焊接原理》相关章节。）"
 
     @staticmethod
-    def _extract_context(content: str, canonical: str, terms: list, width: int = 260) -> str:
-        """从章节内容中提取概念词附近的上下文，作为定义片段"""
+    def _extract_context(content: str, canonical: str, terms: list, width: int = 280) -> str:
+        """从章节内容中提取概念词附近的上下文，作为定义片段。
+        用滑动窗口找 canonical 出现最密集的窗口（主题展开处，而非总论顺带提及）。"""
         target = canonical if canonical in content else next((t for t in terms if t in content), None)
         if not target:
             return content[:width]
-        idx = content.find(target)
+        # 找 canonical 出现最密集的 500 字窗口
+        positions = []
+        start_i = 0
+        while True:
+            i = content.find(target, start_i)
+            if i < 0:
+                break
+            positions.append(i)
+            start_i = i + 1
+        if not positions:
+            return content[:width]
+        # 统计每个位置前后 250 字窗口内 target 出现次数，取最密集
+        best_pos, best_cnt = positions[0], 0
+        for pos in positions:
+            win = content[max(0, pos - 200):pos + 300]
+            cnt = win.count(target)
+            if cnt > best_cnt:
+                best_cnt, best_pos = cnt, pos
+        idx = best_pos
+        # 向前截到最近句号/换行（避免带上不同主题前文）
         start = max(0, idx - 60)
+        head = content[max(0, idx - 100):idx]
+        for sep in ("。", "；", "\n"):
+            pos = head.rfind(sep)
+            if pos >= 0:
+                start = max(0, idx - 100 + pos + 1)
+                break
         end = min(len(content), idx + len(target) + width - 60)
         return content[start:end].strip()
 
@@ -261,19 +292,22 @@ class ExpertKnowledgeBase:
                 pg = data.get("practical_guidance", {})
                 if pg:
                     parts.append("### 实践指导\n" + "\n".join(f"- {k}：{v}" for k, v in pg.items()))
-        # 2) 章节实践要点（摘要 + 关键词）
+        # 2) 章节实践要点（摘要 + 关键词）— 过滤乱码
         seen = set()
         for src_name, chs in chapters_by_source.items():
             for ch in chs:
                 if self._is_noise_title(ch.get("title", "")):
                     continue
                 ch_kws = ch.get("keywords", []) or []
+                summary = ch.get("summary", "") or ""
+                if self._is_garbled(summary):
+                    continue
                 if any(t in ch_kws for t in all_terms if len(t) >= 2):
                     title = ch.get("title", "")
                     if title in seen:
                         continue
                     seen.add(title)
-                    parts.append(f"据《{src_name}》「{title}」：{ch.get('summary','')[:150]}")
+                    parts.append(f"据《{src_name}》「{title}」：{summary[:150]}")
         return "\n\n".join(parts)[:2000]
 
     def _match_processes(self, all_terms) -> list:
@@ -284,10 +318,12 @@ class ExpertKnowledgeBase:
         return out
 
     def _gather_sources(self, canonical, all_terms, chapters_by_source) -> list:
-        """来源：章节关键词命中（优先）+ 章节内容命中（召回，如 氩弧焊 不在关键词但在内容中）"""
+        """来源：章节关键词命中（优先）+ 章节内容命中（召回）。
+        过滤乱码章节，关键词命中优先排序，限制数量。"""
         sources = []
         seen = set()
         terms = [t for t in all_terms if len(str(t)) >= 2]
+        scored = []
         for src_name, chs in chapters_by_source.items():
             for ch in chs:
                 title = ch.get("title", "")
@@ -295,19 +331,25 @@ class ExpertKnowledgeBase:
                     continue
                 ch_kws = ch.get("keywords", []) or []
                 content = ch.get("content", "") or ""
+                if self._is_garbled(content):
+                    continue
                 kw_hit = any(t in ch_kws for t in terms)
                 content_hit = any(t in content for t in terms)
                 if kw_hit or content_hit:
                     seen.add(title)
-                    sources.append({
+                    # 相关度分：关键词命中权重高，内容命中次之
+                    kw_count = sum(1 for t in terms if t in ch_kws)
+                    content_count = sum(content.count(str(t)) for t in terms if t != str(canonical))
+                    score = kw_count * 3 + content_count
+                    scored.append((score, {
                         "book": src_name,
                         "chapter": title,
                         "page_hint": ch.get("page_hint", ""),
                         "match": "keyword" if kw_hit else "content",
-                    })
-                if len(sources) >= 10:
-                    return sources
-        return sources
+                    }))
+        # 按相关度降序，取前8
+        scored.sort(key=lambda x: -x[0])
+        return [s for _, s in scored[:8]]
 
     @staticmethod
     def _is_noise_title(title: str) -> bool:
@@ -318,6 +360,20 @@ class ExpertKnowledgeBase:
         cn = sum(1 for c in t if '一' <= c <= '鿿')
         ratio = cn / max(len(t), 1)
         return ratio < 0.3 and len(t) < 20
+
+    @staticmethod
+    def _is_garbled(text: str, min_cn_ratio: float = 0.55) -> bool:
+        """OCR 乱码过滤：中文占比低于阈值视为乱码（如焊接结构原理的噪声页）"""
+        if not text:
+            return True
+        t = str(text)
+        # 只统计有意义的片段（去空白）
+        meaningful = re.sub(r'\s+', '', t)
+        if not meaningful:
+            return True
+        cn = sum(1 for c in meaningful if '一' <= c <= '鿿')
+        ratio = cn / len(meaningful)
+        return ratio < min_cn_ratio
 
     @staticmethod
     def _terms_overlap(a: list, b: set) -> bool:
