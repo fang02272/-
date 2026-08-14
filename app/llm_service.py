@@ -264,13 +264,33 @@ def parse_llm_response(raw_text: str, query: str, keywords: list, categories: li
     for m in table_pattern.finditer(raw_text):
         tables.append(m.group(1).strip())
 
-    # 提取参考来源行
+    # 提取参考来源行（加固：剔除 markdown 标记、过滤残缺片段）
     references = []
+    seen = set()
     ref_pattern = re.compile(r'(?:参考|参见)[\s：:]*(.+?)(?:\n|$)', re.MULTILINE)
     for m in ref_pattern.finditer(raw_text):
         ref = m.group(1).strip()
-        if any(kw in ref for kw in ["材料焊接原理", "GB", "AWS", "ISO", "第", "章", "节"]):
-            references.append(f"参考{ref}" if not ref.startswith("参考") else ref)
+        # 剔除 markdown 标记（**粗体**、`代码`、行首 #、-、尾部破折号残渣）
+        ref = re.sub(r'\*+', '', ref)
+        ref = ref.strip().lstrip('#').strip().lstrip('-').strip()
+        # 截断到「」或书名号结束：LLM 常见 `参考《X》「Y」 — 说明`，只保留到「Y」或《X》
+        # 找到「」闭合 或 《》闭合位置
+        m_cn = re.search(r'「([^」]{1,30})」', ref)
+        m_book = re.search(r'《([^》]{1,40})》', ref)
+        if m_cn:
+            ref = ref[:m_cn.end()]
+        elif m_book:
+            ref = ref[:m_book.end()]
+        # 过滤残缺片段：必须含《》书名号 或 已知标准/书名，且长度足够
+        if not (len(ref) >= 6 and ('《' in ref or any(k in ref for k in ("GB ", "AWS", "ISO", "第", "章", "节")))):
+            continue
+        if not ref:
+            continue
+        ref_full = f"参考{ref}" if not ref.startswith("参考") else ref
+        key = ref_full.split('「')[0][:30]
+        if key not in seen:
+            seen.add(key)
+            references.append(ref_full)
 
     # 清理 Mermaid 块（避免 markdown 渲染时出错）
     clean_text = mermaid_pattern.sub(lambda m: f'<div class="mermaid-placeholder" data-mermaid="{m.group(1).strip().replace(chr(34), "&quot;").replace(chr(10), "\\n")}"></div>', raw_text)
