@@ -386,7 +386,42 @@ class ExpertKnowledgeBase:
                 start = max(0, idx - 100 + pos + 1)
                 break
         end = min(len(content), idx + len(target) + width - 60)
-        return content[start:end].strip()
+        snippet = content[start:end].strip()
+        return ExpertKnowledgeBase._clean_snippet(snippet)
+
+    @staticmethod
+    def _clean_snippet(text: str, width: int = 400) -> str:
+        """清理定义/应用片段：剔除 [Page N] 页标记、页眉页脚、孤立图注行、多余空行"""
+        if not text:
+            return text
+        import re as _re
+        lines = []
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            # 剔除 [Page N] 页标记
+            if _re.fullmatch(r'\[Page\s*\d+\]', s):
+                continue
+            # 剔除孤立页眉行（如 第三章其他电弧焊方法 155 / 第三章其他电弧焊方法 / 焊接手册 123）
+            if _re.fullmatch(r'第[一二三四五六七八九十\d]+[章节][^\n]{0,30}(\s*\d{1,4})?', s):
+                continue
+            if _re.fullmatch(r'[一-鿿]{2,20}\s*\d{1,4}', s) and len(s) <= 12:
+                continue
+            # 剔除图注行（图3-30xxx / 图1-9 表面活性剂...）
+            if _re.match(r'^图\s*\d+[-－]?\d+', s):
+                continue
+            # 剔除零件号行（1-直流电源；2-控制箱 / 5一送丝机构；6一焊丝）
+            if _re.match(r'^[\d一二三四五六七八九十]+[-\-一][一-鿿]', s):
+                continue
+            # 剔除孤立数字行（如 155 / 3mm 但短）
+            if _re.fullmatch(r'\d+(\.\d+)?(mm|A|V)?', s) and len(s) <= 8:
+                continue
+            lines.append(s)
+        out = "\n".join(lines)
+        # 去除连续空白行
+        out = _re.sub(r'\n{2,}', '\n', out)
+        return out[:width]
 
     def _gather_application(self, canonical, all_terms, chapters_by_source) -> str:
         parts = []
@@ -447,10 +482,15 @@ class ExpertKnowledgeBase:
                 content_hit = any(t in content for t in terms)
                 if kw_hit or content_hit:
                     seen.add(title)
-                    # 相关度分：关键词命中权重高，内容命中次之
+                    # 相关度评分：
+                    #  - 章节标题含 canonical → 高权重（主题章）
+                    #  - 关键词命中 → 中权重
+                    #  - canonical 内容密度（次数/长度）→ 主题展开程度
+                    title_hit = str(canonical) in title or any(t in title for t in terms if len(t) >= 3)
                     kw_count = sum(1 for t in terms if t in ch_kws)
-                    content_count = sum(content.count(str(t)) for t in terms if t != str(canonical))
-                    score = kw_count * 3 + content_count
+                    canon_count = content.count(str(canonical))
+                    density = canon_count / max(len(content), 1) * 10000  # 每万字次数
+                    score = (30 if title_hit else 0) + kw_count * 6 + min(density, 20)
                     scored.append((score, {
                         "book": src_name,
                         "chapter": title,
