@@ -69,6 +69,12 @@ class AnswerCache:
         同义/语序调换的近似问题由 余弦+Jaccard 相似度兜底。
         """
         s = query.strip()
+        # 0. 繁简归一化（繁体→简体，缓存键统一，氩弧焊/氬弧焊 命中同一条缓存）
+        try:
+            from app.welding_qa_system import WeldingQASystem
+            s = WeldingQASystem._normalize_text(s)
+        except Exception:
+            pass
         # 1. 全角→半角
         s = _full_to_half(s)
         # 2. 小写

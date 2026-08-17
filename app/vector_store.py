@@ -85,6 +85,12 @@ def tokenize(text: str) -> List[str]:
     """文本 → 加权 token 流（jieba 多粒度 + 领域术语 + 型号，保留重复用于频次加权）"""
     if not text:
         return []
+    # 繁简归一化（繁体→简体，检索一致）
+    try:
+        from app.welding_qa_system import WeldingQASystem
+        text = WeldingQASystem._normalize_text(text)
+    except Exception:
+        pass
     text = text.lower()
     tokens: List[str] = []
     # 1. 领域术语精确匹配（加权×3）
