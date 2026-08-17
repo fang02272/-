@@ -32,10 +32,19 @@ class KnowledgeStore:
     """持久化知识库，管理原书 + 所有已学习的上传PDF"""
 
     # 焊接领域通用词 — 高频但无辨识度，关键词入库前剔除
+    # [调优] 仅保留 OCR 碎片词和无意义填充词（非真实焊接术语）
+    #        真实焊接术语（气孔/预热/氧化等）改为在 search_across_sources 中用 IDF 降权
     _GENERIC_WORDS = {
         "焊接", "工艺", "方法", "参数", "材料", "结构", "性能",
         "特点", "应用", "过程", "技术", "原理", "分析", "研究", "实验",
         "焊接工艺", "实用焊接", "手册",  # OCR页眉噪声词
+        # [调优] OCR 碎片/截断词（无意义，非完整术语）
+        "中间层材", "等离子喷", "缝金属中", "的钢加热", "保温一段",
+        "有很强的", "化焊接", "材金属之", "与基体材", "间的结合",
+        "度的影响", "的影响", "一层",
+        # [调优] 焊接语境下的无意义填充词
+        "一般来说", "这种方法", "可以看到", "也可以采用", "主要用于",
+        "由于中间", "作为中间", "备注", "原因", "名称", "配方",
     }
 
     def __init__(self, store_dir: str = "saved_knowledge"):
@@ -124,7 +133,8 @@ class KnowledgeStore:
                 "page_hint": ch.get("page_hint", ""),
                 "content": ch.get("content", ""),
                 "content_length": len(ch.get("content", "")),
-                "keywords": list(kw_filtered)[:50],
+                # [调优] 50→30 + 按章节内出现频次降序（讨论最多的术语最相关）
+                "keywords": sorted(kw_filtered, key=lambda k: -ch.get("content", "").count(k))[:30],
                 "summary": summary,
             })
 
@@ -217,7 +227,8 @@ class KnowledgeStore:
                 "page_hint": ch.get("page_hint", ""),
                 "content": content,
                 "content_length": len(content),
-                "keywords": list(kw_filtered)[:50],
+                # [调优] 50→30 + 按章节内出现频次降序（讨论最多的术语最相关）
+                "keywords": sorted(kw_filtered, key=lambda k: -content.count(k))[:30],
                 "summary": summary,
             })
 
@@ -785,13 +796,14 @@ class KnowledgeStore:
         # 2. 高频中文短语提取（2-4字，过滤噪声）
         chinese_phrases = re.findall(r'[一-鿿]{2,4}', text)
         phrase_counter = Counter(chinese_phrases)
-        for phrase, count in phrase_counter.most_common(80):
-            if count >= 3 and phrase not in found and phrase not in stop_words:
+        for phrase, count in phrase_counter.most_common(50):  # [调优] 80→50，收紧候选数
+            if count >= 5 and phrase not in found and phrase not in stop_words:  # [调优] 3→5，提高频次门槛
                 if any(c in phrase for c in welding_chars):
                     found.add(phrase)
 
         # 3. 英文/数字型号提取（焊材牌号、钢号等：E4303, Q345, ER50-6, HJ431...）
-        models = re.findall(r'\b[A-Z]{1,4}\s?[-\s]?\d{2,5}[A-Z0-9-]{0,6}\b', text)
+        # [调优] 正则中 \s→显式空格/tab，防止换行噪声（A\n40, F\n200, ESW\n309L 等）被误匹配
+        models = re.findall(r'\b[A-Z]{1,4}[ \t]?[- \t]?\d{2,5}[A-Z0-9-]{0,6}\b', text)
         for m in models:
             m = m.replace(' ', '').upper()
             if 2 <= len(m) <= 12 and m not in found:
@@ -927,6 +939,16 @@ class KnowledgeStore:
         跨所有知识源搜索匹配的章节 — 使用关键词匹配+标题匹配
         返回带评分的排序结果
         """
+        import math
+
+        # [调优] 预计算每个关键词的 IDF 权重（跨章频率越低 → 权重越高）
+        kw_ch_freq: Dict[str, int] = {}
+        for src in self.registry["sources"]:
+            chapters = self.get_chapters(src["id"])
+            for ch in chapters:
+                for kw in set(ch.get("keywords", [])):
+                    kw_ch_freq[kw] = kw_ch_freq.get(kw, 0) + 1
+
         results = []
         query_lower = query.lower()
 
@@ -938,12 +960,15 @@ class KnowledgeStore:
                 title = ch.get("title", "")
                 ch_keywords = ch.get("keywords", [])
 
-                # 评分：关键词命中数 + 标题命中 + 术语命中
-                score = 0
+                # 评分：IDF 加权关键词 + 标题命中 + 内容命中
+                score = 0.0
                 matched_kws = []
                 for kw in ch_keywords:
                     if kw.lower() in query_lower:
-                        score += 3
+                        freq = kw_ch_freq.get(kw, 1)
+                        # [调优] IDF 加权：1章独有词=3.0分, 10章共享词≈1.0分, 20章≈0.7分
+                        weight = 3.0 / math.log2(1 + freq)
+                        score += weight
                         matched_kws.append(kw)
                 # 标题命中加分
                 title_words = set(title.replace('第', '').replace('章', '').replace('节', '').split())
@@ -953,14 +978,14 @@ class KnowledgeStore:
                 # 术语命中（查询词出现在章节内容中）
                 query_terms = re.findall(r'[\w一-鿿]{2,6}', query)
                 for qt in query_terms:
-                    if qt in content[:2000]:  # 只检查前2000字
+                    if qt in content[:8000]:  # [调优] 2000→8000，覆盖更深的章节内容
                         score += 1
 
                 if score > 0:
                     results.append({
                         "source": source_name,
                         "chapter": title,
-                        "score": score,
+                        "score": round(score, 1),
                         "matched_keywords": matched_kws[:10],
                         "chapter_keywords": ch_keywords[:15],
                         "summary": ch.get("summary", ""),
