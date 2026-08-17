@@ -43,6 +43,12 @@ class SimpleRetriever:
 
     def _tokenize(self, text: str) -> List[str]:
         """中文+英文混合分词（jieba 搜索模式多粒度 + bigram 兜底）"""
+        # 繁简归一化（繁体→简体，检索一致）
+        try:
+            from app.welding_qa_system import WeldingQASystem
+            text = WeldingQASystem._normalize_text(text)
+        except Exception:
+            pass
         tokens = []
         # jieba 搜索模式（多粒度，提升召回；jieba 替换 n-gram，不产生机械双字）
         if self._tokenizer is not None:

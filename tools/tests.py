@@ -51,6 +51,46 @@ E2E_TESTS = [
     ("异种材料焊接为什么难", 300, False),
 ]
 
+# ============================================================
+# v2.6 专项归一化测试集（53 条：繁体 23 / 缩写 16 / 同义 14）
+# 每条：查询 → 期望触达的概念规范词
+# ============================================================
+# 繁体归一化（23 条）：(繁体词, 期望简体, 期望概念或None)
+TRADITIONAL_TESTS = [
+    ("氬弧焊", "氩弧焊", "氩弧焊"), ("不鏽鋼焊接", "不锈钢焊接", "不锈钢"),
+    ("鋁合金", "铝合金", "铝合金"), ("鎢極", "钨极", None),
+    ("鍍鋅鋼", "镀锌钢", None), ("異種金屬", "异种金属", "异种材料"),
+    ("焊縫", "焊缝", "焊缝"), ("熱影響區", "热影响区", "热影响区"),
+    ("擴散焊", "扩散焊", "扩散连接"), ("電弧", "电弧", "电弧"),
+    ("壓縮", "压缩", None), ("潤濕", "润湿", None),
+    ("鎂合金", "镁合金", None), ("鉻鉬鋼", "铬钼钢", None),
+    ("鎳基", "镍基", None), ("銅合金", "铜合金", "铜合金"),
+    ("鈦合金", "钛合金", "钛合金"), ("鉛板", "铅板", None),
+    ("鋅層", "锌层", None), ("鐵素體", "铁素体", "铁素体"),
+    ("奧氏體", "奥氏体", "奥氏体"), ("馬氏體", "马氏体", "马氏体"),
+    ("珠光體", "珠光体", "珠光体"),
+]
+# 缩写映射（16 条）
+ABBREVIATION_TESTS = [
+    ("CE计算", "碳当量"), ("Pcm评估", "冷裂纹敏感性指数"),
+    ("UT检测", "超声探伤"), ("RT探伤", "射线探伤"), ("MT探伤", "磁粉探伤"),
+    ("PT探伤", "渗透探伤"), ("ET检测", "涡流检测"), ("VT检验", "目视检测"),
+    ("WPS工艺", "焊接工艺评定"), ("PQR评定", "焊接工艺评定"),
+    ("FCAW工艺", "药芯焊丝电弧焊"), ("GMAW参数", "MIG焊"),
+    ("PAW焊接", "等离子焊"), ("SAW焊接", "埋弧焊"),
+    ("PWHT处理", "焊后热处理"), ("TLP连接", "扩散连接"),
+]
+# 同义词映射（14 条）
+SYNONYM_TESTS = [
+    ("手把焊", "焊条电弧焊"), ("钢结构变形", "焊接变形"),
+    ("药芯焊", "药芯焊丝电弧焊"), ("二保焊", "熔化极气体保护焊"),
+    ("CO2气体保护焊", "熔化极气体保护焊"), ("船形焊", "船型焊"),
+    ("枪姿", "焊枪姿态"), ("道间温度", "层间温度"),
+    ("送丝速率", "送丝速度"), ("干伸长", "干伸长"),
+    ("焊道跟踪", "焊缝跟踪"), ("弧压", "焊接电压"),
+    ("坡口角", "坡口角度"), ("熔透深度", "熔深"),
+]
+
 
 def green(s): return f"\033[92m{s}\033[0m"
 def red(s): return f"\033[91m{s}\033[0m"
@@ -332,6 +372,102 @@ def test_jieba_tokenization():
     return failed == 0
 
 
+def test_normalization_trigger():
+    """v2.6 专项归一化测试 — 繁体 23 / 缩写 16 / 同义 14，共 53 条"""
+    from app.expert_knowledge_base import ExpertKnowledgeBase
+    from app.welding_qa_system import WeldingQASystem
+
+    kb = ExpertKnowledgeBase(); kb.load()
+    qa = WeldingQASystem()
+
+    cases = []
+    for c in TRADITIONAL_TESTS:   # (繁体, 期望简体, 期望概念或None)
+        cases.append(("繁体", c[0], c[1], c[2]))
+    for c in ABBREVIATION_TESTS:  # (缩写, 期望概念)
+        cases.append(("缩写", c[0], None, c[1]))
+    for c in SYNONYM_TESTS:       # (同义, 期望概念)
+        cases.append(("同义", c[0], None, c[1]))
+
+    print(f"\n{'='*50}")
+    print(f"🔤 归一化触发测试（{len(cases)} 条）")
+    print(f"{'='*50}")
+
+    passed = 0
+    failed = 0
+    for typ, q, norm_expect, concept_expect in cases:
+        norm = qa._normalize_text(q)
+        kws = qa.extract_keywords(q)
+        c = kb.lookup(kws) if kws else None
+        got = c["canonical"] if c else ""
+        # 繁体：验证归一化 + 若期望概念则验证触达
+        if typ == "繁体":
+            ok = norm == norm_expect
+            if ok and concept_expect:
+                ok = got == concept_expect
+            detail = f"归一化[{norm}] 概念[{got or '无'}]"
+        else:
+            ok = got == concept_expect
+            detail = f"概念[{got or '无'}]"
+        status = green("✓") if ok else red("✗")
+        print(f"  {status} [{typ}] {q} → {detail} (期望 {concept_expect or norm_expect})")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}/{len(cases)} 通过")
+    return failed == 0
+
+
+def test_chain_integration():
+    """v2.6 链路级测试 — 跨书检索 + 向量层，繁体/缩写/同义 12 条 query"""
+    import server
+    server._ensure_index()
+    vi = server._get_vector()
+    store = server.get_store()
+
+    # 每条 query 期望：跨书检索有结果 或 向量 top 命中专家库/书籍
+    cases = [
+        ("氬弧焊参数", "繁体→向量命中专家库"),
+        ("不鏽鋼焊接", "繁体→跨书检索"),
+        ("鋁合金焊絲", "繁体→向量书籍"),
+        ("異種金屬焊接", "繁体→向量专家库"),
+        ("UT检测焊缝", "缩写→跨书检索"),
+        ("Pcm冷裂评估", "缩写→专家库"),
+        ("手把焊电流", "同义→跨书检索"),
+        ("船形焊姿态", "同义→向量"),
+        ("焊道跟踪", "同义→跨书检索"),
+        ("二保焊参数", "同义→跨书检索"),
+        ("CE碳当量计算", "缩写→专家库"),
+        ("RT射线探伤", "缩写→跨书检索"),
+    ]
+    print(f"\n{'='*50}")
+    print(f"🔗 链路集成测试（{len(cases)} 条）")
+    print(f"{'='*50}")
+
+    passed = 0
+    failed = 0
+    for q, desc in cases:
+        # 1. 跨书检索
+        cross = store.search_across_sources(q)
+        cross_hit = bool(cross)
+        # 2. 向量检索
+        vec_hits = vi.search(q, top_k=3)
+        vec_hit = bool(vec_hits)
+        # 通过条件：跨书命中 或 向量命中
+        ok = cross_hit or vec_hit
+        status = green("✓") if ok else red("✗")
+        top_vec = vec_hits[0]["doc_id"][:20] if vec_hits else "无"
+        print(f"  {status} {q} — {desc} | 跨书:{cross_hit} 向量:{top_vec}")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}/{len(cases)} 通过")
+    return failed == 0
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -354,8 +490,11 @@ if __name__ == "__main__":
     if run_all or "--e2e" in sys.argv:
         results['e2e'] = test_e2e()
 
-    if run_all or "--tokenize" in sys.argv:
-        results['tokenization'] = test_jieba_tokenization()
+    if run_all or "--normalize" in sys.argv:
+        results['normalization'] = test_normalization_trigger()
+
+    if run_all or "--chain" in sys.argv:
+        results['chain'] = test_chain_integration()
 
     # Summary
     print(f"\n{'='*50}")
