@@ -199,10 +199,36 @@ def _material_params(material_key: str) -> dict:
     return MATERIAL_PARAM_MAP.get(material_key, {}) or {}
 
 
+def _guess_joint(query_text: str) -> str:
+    """从查询原文猜焊缝形式（卡诺普真值匹配用）"""
+    if not query_text:
+        return ""
+    if "船" in query_text:
+        return "船型"
+    if "内角" in query_text:
+        return "内角"
+    if "外角" in query_text:
+        return "外角"
+    if "搭接" in query_text:
+        return "搭接"
+    if "拼" in query_text or "对接" in query_text:
+        return "平拼接"
+    return ""
+
+
 def build_process_card(extracted: dict, param_match: dict, query: str = "") -> Optional[dict]:
     """由 意图抽取 + 参数匹配 结果构建结构化工艺卡片。
     返回机器可读 dict；数据不足时返回 None（调用方回退到常规回答）。"""
-    if not param_match or not param_match.get("matched"):
+    # 有材料+板厚 且 真值库能命中 → 即使 match_parameters 未匹配也生成卡片
+    thickness = extracted.get("thickness")
+    material0 = (param_match or {}).get("material") or (extracted.get("materials") or [None])[0]
+    _has_weld = False
+    if find_weld_case is not None and material0 and thickness is not None:
+        try:
+            _has_weld = find_weld_case(material0, thickness, _guess_joint(query), "基准") is not None
+        except Exception:
+            _has_weld = False
+    if (not param_match or not param_match.get("matched")) and not _has_weld:
         return None
 
     thickness = extracted.get("thickness")
@@ -232,10 +258,27 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
     robot = dict(_ROBOT_BASE.get(process or "", {}))
 
     # [v2.6] 卡诺普真值优先：材料+板厚+焊缝形式 → 真实电流/电压/速度/角度
+    # 焊缝形式优先从 query 原文提取（match_parameters 不返回 joint）
+    query_for_variant = query or ""
+    _joint_guess = param_match.get("joint") or _guess_joint(query_for_variant)
+    if any(k in query_for_variant for k in ("电流大", "电流最大", "电流上限", "大电流")):
+        _variant = "电流大"
+    elif any(k in query_for_variant for k in ("电流小", "电流最小", "小电流")):
+        _variant = "电流小"
+    elif any(k in query_for_variant for k in ("电压大", "电压高")):
+        _variant = "电压大"
+    elif any(k in query_for_variant for k in ("电压小", "电压低")):
+        _variant = "电压小"
+    elif any(k in query_for_variant for k in ("速度快", "焊速快", "高速焊")):
+        _variant = "速度快"
+    elif any(k in query_for_variant for k in ("速度慢", "焊速慢", "低速焊")):
+        _variant = "速度慢"
+    else:
+        _variant = "基准"
     weld_case = None
     if find_weld_case is not None:
         try:
-            weld_case = find_weld_case(material, thickness, param_match.get("joint") or "")
+            weld_case = find_weld_case(material, thickness, _joint_guess, _variant)
         except Exception:
             weld_case = None
 
