@@ -31,3 +31,6 @@ tools/*_result.txt
 # ===== 系统 =====
 Thumbs.db
 .DS_Store
+
+# ===== PPT 工具链产物 =====
+ppt_build/
