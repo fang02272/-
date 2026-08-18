@@ -195,3 +195,101 @@ def build_robot_block(material: str, thickness: float, process: str,
         "pass_sequence": seq,
         "pipe": _pipe_strategy(is_pipe, pipe_fixed),
     }
+
+
+# ============================================================
+# 卡诺普机器人焊接真值库（weld_cases.json）
+# ============================================================
+import json as _json
+from pathlib import Path as _Path
+
+_weld_cases = None
+
+
+def _load_weld_cases():
+    """加载卡诺普真值库（懒加载）"""
+    global _weld_cases
+    if _weld_cases is not None:
+        return _weld_cases
+    p = _Path(__file__).resolve().parent.parent / "data" / "weld_cases.json"
+    if p.exists():
+        try:
+            _weld_cases = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            _weld_cases = []
+    else:
+        _weld_cases = []
+    return _weld_cases
+
+
+def _normalize_material(material: str) -> str:
+    """材料归一化：低碳钢/碳钢/镀锌板/不锈钢 映射"""
+    if not material:
+        return ""
+    m = material.strip()
+    if "镀锌" in m:
+        return "镀锌板"
+    if "不锈钢" in m or "奥氏体" in m or "双相" in m:
+        return "不锈钢"
+    if "碳钢" in m or "低碳钢" in m or "Q" in m or "低合金" in m or "高强" in m:
+        return "碳钢"
+    if "铝" in m:
+        return "铝合金"
+    return m
+
+
+def _normalize_joint(joint: str) -> str:
+    """焊缝形式归一化：船型/平拼接/平搭接/平内角/立内角/平外角/立外角 等"""
+    if not joint:
+        return ""
+    j = joint.strip()
+    if "船" in j:
+        return "船型"
+    if "平" in j:
+        if "拼" in j or "对" in j:
+            return "平拼接"
+        if "搭" in j:
+            return "平搭接"
+        if "内角" in j:
+            return "平内角"
+        if "外角" in j:
+            return "平外角"
+        if "接" in j:
+            return "平拼接"
+    if "立" in j:
+        if "拼" in j or "对" in j:
+            return "立拼接"
+        if "搭" in j:
+            return "立搭接"
+        if "内角" in j:
+            return "立内角"
+        if "外角" in j:
+            return "立外角"
+    return j
+
+
+def find_weld_case(material: str, thickness, joint: str = "") -> Optional[dict]:
+    """查卡诺普真值：材料+板厚（+焊缝形式）→ 最匹配的工艺参数
+    返回 {current, voltage, speed, stick_out, gun_angle_fb, gun_angle_lr, ...} 或 None"""
+    cases = _load_weld_cases()
+    if not cases:
+        return None
+    mat = _normalize_material(material)
+    jt = _normalize_joint(joint)
+    best = None
+    for c in cases:
+        if c.get("material") != mat:
+            continue
+        # 焊缝形式匹配（船型/平拼接等）
+        if jt and c.get("joint") != jt:
+            continue
+        # 板厚匹配（精确或最接近）
+        ct = c.get("thickness")
+        if ct is None or thickness is None:
+            continue
+        delta = abs(ct - thickness)
+        if best is None or delta < best[0]:
+            best = (delta, c)
+    if best and best[0] <= 2.0:  # 板厚偏差≤2mm 视为命中
+        return best[1]
+    return None

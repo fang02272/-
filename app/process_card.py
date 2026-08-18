@@ -21,10 +21,11 @@ except ImportError:
     ELECTRODE_PARAM_TABLE = {}
 
 try:
-    from app.robot_welding import build_robot_block, ROBOT_DEFAULT_PROCESS
+    from app.robot_welding import build_robot_block, ROBOT_DEFAULT_PROCESS, find_weld_case
 except ImportError:
     build_robot_block = None
     ROBOT_DEFAULT_PROCESS = "GMAW/MIG (熔化极氩弧焊)"
+    find_weld_case = None
 
 
 # ============================================================
@@ -229,9 +230,25 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
                 break
 
     robot = dict(_ROBOT_BASE.get(process or "", {}))
+
+    # [v2.6] 卡诺普真值优先：材料+板厚+焊缝形式 → 真实电流/电压/速度/角度
+    weld_case = None
+    if find_weld_case is not None:
+        try:
+            weld_case = find_weld_case(material, thickness, param_match.get("joint") or "")
+        except Exception:
+            weld_case = None
+
     travel_speed = _find_rec(param_match, "焊速") or pp.get("焊速范围", "")
     current = _find_rec(param_match, "电流") or pp.get("电流范围", "")
     voltage = _find_rec(param_match, "电压") or pp.get("电压范围", "")
+    if weld_case:
+        if weld_case.get("current"):
+            current = f"{weld_case['current']:g}A"
+        if weld_case.get("voltage"):
+            voltage = f"{weld_case['voltage']:g}V"
+        if weld_case.get("speed"):
+            travel_speed = f"{weld_case['speed']:g} cm/min"
     preheat = _find_rec(param_match, "预热") or (mp.get("预热") if isinstance(mp.get("预热"), str) else "")
     interpass = _find_rec(param_match, "层间温度") or mp.get("层间温度", "")
     postheat = _find_rec(param_match, "后热") or mp.get("后热", "")
@@ -288,13 +305,14 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
             "inspection": "外观检验（咬边/裂纹/焊瘤）+ 按需无损检测（RT/UT/PT）",
         },
         "equipment": _load_equipment(),
-        "robot": _build_robot_field(material, thickness, process, query),
+        "robot": _build_robot_field(material, thickness, process, query, weld_case),
         "application": param_match.get("application", ""),
     }
 
 
-def _build_robot_field(material, thickness, process, query_text: str = ""):
-    """构建机器人焊接字段（robot block）：焊丝/TCP/枪姿态/船型焊/层道/管道策略"""
+def _build_robot_field(material, thickness, process, query_text: str = "", weld_case: dict = None):
+    """构建机器人焊接字段（robot block）：焊丝/TCP/枪姿态/船型焊/层道/管道策略。
+    weld_case: 卡诺普真值（优先用其焊枪角度/摆幅/频率）。"""
     if build_robot_block is None:
         return {}
     try:
@@ -302,7 +320,24 @@ def _build_robot_field(material, thickness, process, query_text: str = ""):
         query_text = query_text or ""
         is_pipe = any(k in query_text for k in ("管道", "管", "圆弧", "圆管", "固定管", "6G", "5G", "45°管"))
         pipe_fixed = not any(k in query_text for k in ("旋转", "滚轮", "转动"))
-        return build_robot_block(material, thickness, process, is_pipe, pipe_fixed)
+        block = build_robot_block(material, thickness, process, is_pipe, pipe_fixed)
+        # 卡诺普真值覆盖：焊枪角度/摆幅/频率
+        if weld_case and isinstance(block, dict):
+            if weld_case.get("gun_angle_fb") is not None or weld_case.get("gun_angle_lr") is not None:
+                fb = weld_case.get("gun_angle_fb")
+                lr = weld_case.get("gun_angle_lr")
+                block["gun_pose"] = {
+                    "work_angle": f"{fb:g}°" if fb is not None else "80°",
+                    "travel_angle": f"{lr:g}°" if lr is not None else "90°",
+                    "axis_rotation": "0°",
+                    "source": "卡诺普实测",
+                }
+            if weld_case.get("weave_width") is not None:
+                block.setdefault("robot_params", {})["weave_width"] = f"{weld_case['weave_width']:g}mm"
+            if weld_case.get("weave_freq") is not None:
+                block.setdefault("robot_params", {})["weave_frequency"] = f"{weld_case['weave_freq']:g} Hz"
+            block["data_source"] = "卡诺普实测" if weld_case.get("current") else "规则经验值"
+        return block
     except Exception:
         return {}
 
