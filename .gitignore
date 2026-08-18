@@ -36,3 +36,6 @@ Thumbs.db
 # ===== IDE =====
 .idea/
 *.iml
+
+# ===== 个人汇报工具（不提交到项目组仓库）=====
+gen_report_ppt.py
