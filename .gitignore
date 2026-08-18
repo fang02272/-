@@ -24,6 +24,9 @@ saved_knowledge/vector_index_test/
 # ===== 原始资料 =====
 data/
 
+# ===== AI 模型（大文件，不入库）=====
+models/
+
 # ===== 日志 / 输出 =====
 *.log
 tools/*_result.txt
