@@ -51,6 +51,18 @@ E2E_TESTS = [
     ("异种材料焊接为什么难", 300, False),
 ]
 
+# v2.6 真实场景 E2E：(查询, 期望意图, 期望产物类型)
+# 产物类型: concept=概念解析 / card=工艺卡片(真值) / llm=LLM兜底
+REAL_E2E_TESTS = [
+    ("什么是氩弧焊", "concept", "concept"),
+    ("Q345钢板12mm对接焊", "parameter", "card"),
+    ("碳钢 5mm 船型焊", "parameter", "card"),
+    ("不锈钢 2mm 平搭接", "parameter", "card"),
+    ("镀锌板 1mm 船型焊", "parameter", "card"),
+    ("什么是热影响区", "concept", "concept"),
+    ("焊机器人系统组成", "other", "llm"),
+]
+
 # ============================================================
 # v2.6 专项归一化测试集（53 条：繁体 23 / 缩写 16 / 同义 14）
 # 每条：查询 → 期望触达的概念规范词
@@ -298,6 +310,73 @@ def test_e2e():
     return failed == 0
 
 
+def test_real_e2e():
+    """真实场景端到端（v2.6 全链路）— 走 process_query，验证概念/卡片/LLM"""
+    import server
+    server._ensure_index()
+    from app.qa_router import QueryIntent
+
+    cases = [
+        # (查询, 期望意图, 期望产物)
+        ("什么是氩弧焊", QueryIntent.CONCEPT, "concept"),
+        ("Q345钢板12mm对接焊", QueryIntent.PARAMETER, "card"),
+        ("碳钢 5mm 船型焊", QueryIntent.PARAMETER, "card"),
+        ("不锈钢 2mm 平搭接", QueryIntent.PARAMETER, "card"),
+        ("镀锌板 1mm 船型焊", QueryIntent.PARAMETER, "card"),
+        ("什么是热影响区", QueryIntent.CONCEPT, "concept"),
+        ("焊机器人系统组成", QueryIntent.OTHER, "llm"),
+    ]
+    print(f"\n{'='*50}")
+    print(f"🌐 真实场景端到端测试（{len(cases)} 条）")
+    print(f"{'='*50}")
+
+    passed = 0
+    failed = 0
+    for q, expect_intent, expect_prod in cases:
+        try:
+            p = server.process_query(q)
+        except Exception as e:
+            print(f"  {red('✗')} {q} → 异常: {e}")
+            failed += 1
+            continue
+        got_intent = (p.get("route") or {}).get("intent", "other")
+        got_prod = None
+        secs = p.get("sections") or {}
+        if p.get("process_card"):
+            got_prod = "card"
+        elif secs.get("concept_definition"):
+            got_prod = "concept"
+        elif p.get("content") and len(str(p.get("content"))) > 50:
+            got_prod = "llm"
+        elif any(
+            isinstance(s, dict) and s.get("visible", True) is not False
+            and (len(str(s.get("content", "") or "")) > 30 or s.get("items"))
+            for s in secs.values()
+        ):
+            got_prod = "knowledge"  # science/recommendations 等本地内容
+
+        # 意图匹配（宽松：expect_intent 是主判，OTHER 接受非概念/卡片）
+        intent_ok = got_intent == expect_intent.value or \
+                    (expect_intent == QueryIntent.OTHER and got_intent == "other")
+        # 产物匹配
+        if expect_prod == "card":
+            prod_ok = got_prod == "card"
+        elif expect_prod == "concept":
+            prod_ok = got_prod == "concept"
+        else:
+            prod_ok = got_prod in ("llm", "concept", "knowledge")  # OTHER 可回退概念/知识
+        ok = intent_ok and prod_ok and p.get("model_used") not in ("", None)
+        status = green("✓") if ok else red("✗")
+        print(f"  {status} {q} → 意图[{got_intent}] 产物[{got_prod}] model[{p.get('model_used')}]")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}/{len(cases)} 通过")
+    return failed == 0
+
+
 def test_cross_source_search():
     """跨知识源搜索测试"""
     from app.knowledge_store import get_store
@@ -491,6 +570,7 @@ if __name__ == "__main__":
 
     if run_all or "--e2e" in sys.argv:
         results['e2e'] = test_e2e()
+        results['real_e2e'] = test_real_e2e()
 
     if run_all or "--normalize" in sys.argv:
         results['normalization'] = test_normalization_trigger()

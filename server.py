@@ -376,6 +376,23 @@ def _assemble_local_payload(plan: dict, result: dict, q: str, t0) -> dict:
         sections = dict(result.get("sections", {}) or {})
         if "cross_analysis" in sections:
             sections.pop("cross_analysis")
+    # [v2.6] OTHER/空内容兜底：用跨源检索的章节摘要生成"相关知识"
+    if not sections:
+        try:
+            from app.knowledge_store import get_store
+            cross = get_store().search_across_sources(q)
+        except Exception:
+            cross = []
+        if cross:
+            related = []
+            for m in cross[:5]:
+                rel = f"《{m['source']}》「{m['chapter']}」：{m.get('summary', '')[:150]}"
+                if rel not in related:
+                    related.append(rel)
+            if related:
+                sections["related_knowledge"] = {
+                    "title": "相关知识", "icon": "📖",
+                    "content": "\n\n".join(related), "visible": True}
 
     references = []
     src_section = sections.get("sources")
