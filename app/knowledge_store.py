@@ -827,6 +827,13 @@ class KnowledgeStore:
             for p in parts:
                 p = p.strip()
                 if 15 < len(p) < 200:
+                    # [v2.6] 乱码过滤：中文占比过低（<0.55）的句子跳过
+                    meaningful = re.sub(r'\s+', '', p)
+                    if not meaningful:
+                        continue
+                    cn = sum(1 for c in meaningful if '一' <= c <= '鿿')
+                    if cn / len(meaningful) < 0.55:
+                        continue
                     sentences.append(p)
                 if len(sentences) >= 4:
                     break

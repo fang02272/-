@@ -744,9 +744,19 @@ def process_query(q: str) -> dict:
     except Exception:
         pass
 
-    # --- Step 3: 向量检索 + 专家库概念命中 ---
+    # --- Step 3: 向量检索 + 专家库概念命中（关键词优先，向量增强） ---
     vector_hits = _get_vector().search(q, top_k=8)
     concept = _get_expert_kb().lookup(keywords) if keywords else None
+    # [v2.6] 三层融合：关键词没命中概念时，用向量 top 命中补（语义关联）
+    if concept is None:
+        for vh in vector_hits[:5]:
+            cid = vh.get("doc_id", "")
+            if cid.startswith("expert/"):
+                cname = cid[len("expert/"):]
+                c = _get_expert_kb().get_concept(cname)
+                if c:
+                    concept = c
+                    break
 
     # --- Step 4: 意图路由（内部思考①·意图解析，不展示） ---
     plan = _get_router().analyze_intent(q, keywords)
