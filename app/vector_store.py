@@ -143,6 +143,49 @@ def feature_vec(text: str, dim: int = 4096):
 
 
 # ------------------------------------------------------------
+# 语义向量（bge 中文 embedding，懒加载）
+# ------------------------------------------------------------
+_sem_model = None
+_SEM_DIM = 512
+
+
+def _get_sem_model():
+    """懒加载 bge 语义向量模型（modelscope 下载）"""
+    global _sem_model
+    if _sem_model is not None:
+        return _sem_model
+    try:
+        from sentence_transformers import SentenceTransformer
+        import os
+        # 找模型路径
+        candidates = [
+            "models/models/AI-ModelScope--bge-small-zh-v1.5/snapshots/master",
+            "models/AI-ModelScope/bge-small-zh-v1.5",
+        ]
+        path = next((p for p in candidates if os.path.isdir(p)), None)
+        if path:
+            _sem_model = SentenceTransformer(path)
+            _SEM_DIM = 512
+            return _sem_model
+    except Exception:
+        pass
+    return None
+
+
+def semantic_vec(text: str):
+    """文本 → 语义向量（512维），模型不可用返回 None"""
+    model = _get_sem_model()
+    if model is None or not text:
+        return None
+    try:
+        import numpy as _np
+        v = model.encode([text], normalize_embeddings=True)[0]
+        return _np.asarray(v, dtype=_np.float32)
+    except Exception:
+        return None
+
+
+# ------------------------------------------------------------
 # 向量索引
 # ------------------------------------------------------------
 class VectorIndex:
@@ -155,20 +198,26 @@ class VectorIndex:
         self.index_dir = Path(index_dir)
         self.ids: List[str] = []
         self.meta: Dict[str, dict] = {}
-        self._vecs: List = []  # list[np.ndarray]
+        self._vecs: List = []  # list[np.ndarray] 特征向量
+        self._sem_vecs: List = []  # list[np.ndarray|None] 语义向量
         self._lock = threading.RLock()
 
     # ---------- 写入 ----------
     def add_document(self, doc_id: str, text: str, meta: dict = None) -> None:
-        """新增一个文档向量（幂等：同 doc_id 先删旧）"""
+        """新增一个文档向量（幂等：同 doc_id 先删旧）。
+        存特征向量 + 语义向量（bge），检索时融合。"""
         with self._lock:
             if doc_id in self.ids:
                 self.remove_document(doc_id)
             vec = feature_vec(text, self.dim)
             if vec is None:
                 return
+            sem = semantic_vec(text)  # 语义向量（模型不可用返回 None）
             self.ids.append(doc_id)
             self._vecs.append(vec)
+            if not hasattr(self, "_sem_vecs"):
+                self._sem_vecs = []
+            self._sem_vecs.append(sem)
             self.meta[doc_id] = meta or {}
 
     def add_batch(self, docs: List[dict]) -> None:
@@ -182,6 +231,8 @@ class VectorIndex:
                 i = self.ids.index(doc_id)
                 self.ids.pop(i)
                 self._vecs.pop(i)
+                if hasattr(self, "_sem_vecs") and len(self._sem_vecs) > i:
+                    self._sem_vecs.pop(i)
                 self.meta.pop(doc_id, None)
 
     def remove_by_source(self, source: str) -> None:
@@ -193,7 +244,7 @@ class VectorIndex:
 
     # ---------- 检索 ----------
     def search(self, query: str, top_k: int = 8) -> List[dict]:
-        """余弦检索 → [{doc_id, score, meta}]"""
+        """余弦检索（特征向量 + 语义向量融合）→ [{doc_id, score, meta}]"""
         if np is None or not self._vecs:
             return []
         qvec = feature_vec(query, self.dim)
@@ -201,6 +252,19 @@ class VectorIndex:
             return []
         matrix = np.stack(self._vecs).astype(np.float32)
         scores = matrix @ qvec
+
+        # 语义向量融合（模型可用时提升语义相关命中）
+        qsem = semantic_vec(query)
+        if qsem is not None and hasattr(self, "_sem_vecs") and self._sem_vecs:
+            sem_mask = [i for i, v in enumerate(self._sem_vecs) if v is not None]
+            if sem_mask:
+                sem_matrix = np.stack([self._sem_vecs[i] for i in sem_mask]).astype(np.float32)
+                sem_scores = sem_matrix @ qsem
+                # 特征 0.7 + 语义 0.3 融合
+                for rank, i in enumerate(sem_mask):
+                    if len(self.ids) > 0:
+                        scores[i] = 0.7 * scores[i] + 0.3 * sem_scores[rank]
+
         top = int(min(top_k, len(self.ids)))
         if top <= 0:
             return []
@@ -253,15 +317,35 @@ class VectorIndex:
             if matrix.shape[0] != len(self.ids) or matrix.shape[1] != self.dim:
                 return False
             self._vecs = [matrix[i] for i in range(matrix.shape[0])]
+            # 语义向量：加载后懒重建（模型可用时 batch 编码）
+            self._sem_vecs = [None] * len(self.ids)
             return True
         except Exception:
             return False
+
+    def rebuild_semantic_vectors(self, texts: list = None):
+        """批量重建语义向量（加载后调用）。texts 长度需与 ids 一致，否则从 meta 内容重建。"""
+        if not self.ids:
+            return
+        model = _get_sem_model()
+        if model is None:
+            self._sem_vecs = [None] * len(self.ids)
+            return
+        try:
+            if texts is None or len(texts) != len(self.ids):
+                texts = [self.meta.get(d, {}).get("chapter", d) for d in self.ids]
+            import numpy as _np
+            vecs = model.encode(texts, normalize_embeddings=True, batch_size=32)
+            self._sem_vecs = [_np.asarray(v, dtype=_np.float32) for v in vecs]
+        except Exception:
+            self._sem_vecs = [None] * len(self.ids)
 
     def clear_all(self) -> None:
         with self._lock:
             self.ids = []
             self.meta = {}
             self._vecs = []
+            self._sem_vecs = []
 
     def stats(self) -> dict:
         return {
