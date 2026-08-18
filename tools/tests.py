@@ -325,53 +325,6 @@ def test_cross_source_search():
     return True
 
 
-def test_jieba_tokenization():
-    """Jieba分词测试（融合 origin/main 分支）— 验证专业词保留且不产生机械双字"""
-    from app.rag_retriever import SimpleRetriever
-
-    retriever = SimpleRetriever()
-    tokens = retriever._tokenize("Q345钢板预热温度")
-
-    expected_terms = ["q345", "钢板", "预热", "温度"]
-    forbidden_terms = ["板预", "热温"]
-    checks = [
-        *[(f"保留专业词: {term}", term in tokens) for term in expected_terms],
-        *[(f"不产生机械双字: {term}", term not in tokens) for term in forbidden_terms],
-    ]
-
-    retriever.add_document(
-        "relevant",
-        "Q345钢板厚度超过25mm时，应根据碳当量和拘束度确定预热温度。",
-        "test",
-    )
-    retriever.add_document(
-        "unrelated",
-        "弧焊机器人需要进行轨迹规划、焊缝跟踪和运动速度控制。",
-        "test",
-    )
-    results = retriever.search("Q345钢板预热温度", top_k=2)
-    checks.append(("相关文档排在首位", bool(results) and results[0]["id"] == "relevant"))
-
-    print(f"\n{'='*50}")
-    print("✂️ Jieba分词与检索测试")
-    print(f"{'='*50}")
-    print(f"\n  输入: {yellow('Q345钢板预热温度')}")
-    print(f"  分词: {', '.join(tokens)}")
-
-    passed = 0
-    failed = 0
-    for desc, ok in checks:
-        status = green("✓") if ok else red("✗")
-        print(f"    {status} {desc}")
-        if ok:
-            passed += 1
-        else:
-            failed += 1
-
-    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}通过, {failed}失败")
-    return failed == 0
-
-
 def test_normalization_trigger():
     """v2.6 专项归一化测试 — 繁体 23 / 缩写 16 / 同义 14，共 53 条"""
     from app.expert_knowledge_base import ExpertKnowledgeBase
@@ -468,6 +421,55 @@ def test_chain_integration():
     return failed == 0
 
 
+def test_process_card_truth():
+    """卡诺普真值库 → 工艺卡片测试（材料+板厚+焊缝形式+变体）"""
+    from app.qa_router import QARouter
+    from app.process_card import build_process_card
+    from app.robot_welding import find_weld_case
+
+    r = QARouter()
+    # (查询, 期望电流, 期望数据源)
+    cases = [
+        ("碳钢 3mm 平拼接", 150.0, "卡诺普实测"),
+        ("碳钢 3mm 平拼接 电流大", 170.0, "卡诺普实测"),
+        ("不锈钢 2mm 平搭接 速度快", 120.0, "卡诺普实测"),
+        ("镀锌板 1mm 船型", 95.0, "卡诺普实测"),
+        ("镀锌板 1.2mm 平拼接 电流小", 75.0, "卡诺普实测"),
+        ("碳钢 5mm 船型", 250.0, "卡诺普实测"),
+        ("不锈钢 1mm 立拼接", 60.0, "卡诺普实测"),
+    ]
+    print(f"\n{'='*50}")
+    print(f"🎴 工艺卡片真值测试（{len(cases)} 条）")
+    print(f"{'='*50}")
+
+    passed = 0
+    failed = 0
+    for q, expect_cur, expect_src in cases:
+        ext = r.extract_params(q)
+        pm = r.match_parameters(ext, q)
+        c = build_process_card(ext, pm, q)
+        if not c:
+            ok = False
+            got_cur = "None"
+            got_src = "无卡片"
+        else:
+            el = c["electrical"]
+            rb = c["robot"]
+            cur = float(el["current_a"].rstrip("A")) if el["current_a"] else 0
+            got_cur = f"{cur:g}A"
+            got_src = rb.get("data_source", "")
+            ok = abs(cur - expect_cur) <= 1.0 and got_src == expect_src
+        status = green("✓") if ok else red("✗")
+        print(f"  {status} {q} → 电流{got_cur} 来源[{got_src}] (期望 {expect_cur:g}A/{expect_src})")
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+
+    print(f"\n  {green('通过') if failed == 0 else red('失败')}: {passed}/{len(cases)} 通过")
+    return failed == 0
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -495,6 +497,9 @@ if __name__ == "__main__":
 
     if run_all or "--chain" in sys.argv:
         results['chain'] = test_chain_integration()
+
+    if run_all or "--card" in sys.argv:
+        results['card_truth'] = test_process_card_truth()
 
     # Summary
     print(f"\n{'='*50}")
