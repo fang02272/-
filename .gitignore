@@ -34,3 +34,7 @@ Thumbs.db
 
 # ===== PPT 工具链产物 =====
 ppt_build/
+
+# ===== IDE =====
+.idea/
+*.iml

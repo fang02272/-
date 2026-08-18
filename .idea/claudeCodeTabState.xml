@@ -8,7 +8,7 @@
             <TabSessionState>
               <option name="provider" value="claude" />
               <option name="sessionId" value="11cfc83d-c347-424c-bc12-3d79e95b5782" />
-              <option name="cwd" value="E:\PyCharmMisProject" />
+              <option name="cwd" value="C:\Users\78008\PyCharmMiscProject" />
               <option name="model" value="claude-haiku-4-5" />
               <option name="permissionMode" value="acceptEdits" />
             </TabSessionState>
