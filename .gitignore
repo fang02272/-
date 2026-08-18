@@ -6,8 +6,6 @@ __pycache__/
 # ===== 虚拟环境 =====
 .venv/
 .venv-gpu/
-venv/
-env/
 
 # ===== 上传的 PDF 与 OCR 缓存 =====
 uploads/*.pdf
@@ -34,9 +32,6 @@ tools/*_result.txt
 # ===== 系统 =====
 Thumbs.db
 .DS_Store
-
-# ===== PPT 工具链产物 =====
-ppt_build/
 
 # ===== IDE =====
 .idea/
