@@ -37,9 +37,14 @@ MANUAL_DEFINITIONS = {
         "process_types": ["扩散焊接"],
     },
     "机器人焊接": {
-        "definition": "机器人焊接：利用工业机器人（如 MR2010_1 六轴机器人）夹持焊枪，按预编程轨迹自动完成定位、送丝、焊接与姿态调整的自动化焊接方式。核心是焊缝跟踪、姿态规划（工作角/行走角）、焊接参数与机器人运动的协同控制。",
+        "definition": "机器人焊接：利用工业机器人夹持焊枪，按预编程轨迹自动完成定位、送丝、焊接与姿态调整的自动化焊接方式。其核心在于焊缝跟踪、姿态规划（工作角/行走角）以及焊接参数与机器人运动的协同控制，是焊接自动化与智能化的主要形式。",
         "application": "适合大批量、重复性、多道多层或危险环境焊接；与工艺卡片结合可减少示教时间——输入材料/板厚/工艺即可获得电流电压、枪姿态、层道序列。",
         "process_types": ["GMAW/MIG (熔化极氩弧焊)", "FCAW (药芯焊丝CO₂焊)"],
+    },
+    "弧焊机器人": {
+        "definition": "弧焊机器人：专用于电弧焊作业的工业机器人系统，由机器人本体（如 MR2010_1 六轴机器人）、弧焊电源（如 NBC-500RP）、送丝机构、焊枪及控制系统组成。它能夹持焊枪沿预编程轨迹运动，配合焊缝跟踪传感器实现自动化弧焊。",
+        "application": "用于碳钢/不锈钢/铝合金等结构件的自动化焊接；本体承载能力与重复定位精度决定适用焊件范围；配变位机可实现船型焊/全位置焊接，减少人工示教。",
+        "process_types": ["GMAW/MIG (熔化极氩弧焊)", "FCAW (药芯焊丝CO₂焊)", "GTAW/TIG (钨极氩弧焊)"],
     },
     "氢致开裂": {
         "definition": "氢致开裂（HIC/Hydrogen Induced Cracking）：焊接过程中溶解在金属中的氢在应力与显微缺陷处聚集，超过材料容纳能力后形成裂纹。是低合金高强钢、管线钢焊接冷裂纹的主要形式之一，与扩散氢含量、拘束度、冷却速度（t8/5）密切相关。",
@@ -1258,18 +1263,19 @@ class ExpertKnowledgeBase:
         return self.concepts.get(canonical)
 
     def lookup(self, keywords: list) -> Optional[dict]:
-        """按关键词命中概念条目：先规范词，再别名反查，再子串模糊"""
-        for kw in keywords or []:
-            kw_s = str(kw).strip()
+        """按关键词命中概念条目：更长更精确优先，同长度概念名优先于别名。
+        修复1：'埋弧焊机器人'(5字) > '弧焊机器人'(4字)，命中埋弧焊
+        修复2：'等离子焊'(概念) = 'PAUT'(别名) 同长，概念名优先"""
+        kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+        kws.sort(key=lambda k: (-len(k), k not in self.concepts))  # 长优先，同长概念名优先
+        # 1. 精确：更长优先，同长概念名 > 别名
+        for kw_s in kws:
             if kw_s in self.concepts:
                 return self.concepts[kw_s]
-        for kw in keywords or []:
-            kw_s = str(kw).strip()
             if kw_s in self._alias_index:
                 return self.concepts.get(self._alias_index[kw_s])
-        # 模糊：概念名是关键词子串
-        for kw in keywords or []:
-            kw_s = str(kw).strip()
+        # 2. 模糊：概念名是关键词子串
+        for kw_s in kws:
             if len(kw_s) < 2:
                 continue
             for canonical in self.concepts:
