@@ -97,6 +97,9 @@ def auto_learn_uploads():
         vi.clear_all()
         kb = ExpertKnowledgeBase()
         kb.build(store)
+        from app.answer_cache import sources_fingerprint
+        kb.built_from["sources_fingerprint"] = sources_fingerprint(store)
+        kb.save()
         for canonical, entry in kb.concepts.items():
             vi.add_document(
                 f"expert/{canonical}",
@@ -115,7 +118,7 @@ def auto_learn_uploads():
 
 def main():
     print("=" * 55)
-    print("  🔬 焊接工艺专家系统 v2.0")
+    print("  🔬 焊接工艺专家系统 v2.7")
     print("  AI大模型 + 《材料焊接原理》+ PDF知识库")
     print("=" * 55)
     print()

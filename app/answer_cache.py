@@ -10,6 +10,7 @@
 
 import hashlib
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -55,6 +56,13 @@ class AnswerCache:
         self.path = Path(path)
         self._entries: Dict[str, dict] = {}  # norm -> {payload, vec, fp, ts, hits}
         self._lock = threading.Lock()
+        self._hits = 0
+        self._exact_hits = 0
+        self._similar_hits = 0
+        self._misses = 0
+        self._evictions = 0
+        self._expirations = 0
+        self._invalidations = 0
         self._load()
 
     # ------------------------------------------------------------
@@ -81,6 +89,8 @@ class AnswerCache:
         s = s.lower()
         # 3. 去空白（含数字/单位间的空格：'90 - 110 A' → '90-110a'）
         s = "".join(s.split())
+        # 4. 查询语气标点不应产生不同缓存键；技术符号（- / + °）保留
+        s = re.sub(r"[?!.。,，;；:：、'\"“”‘’]+", "", s)
         return s
 
     # ------------------------------------------------------------
@@ -95,9 +105,15 @@ class AnswerCache:
         with self._lock:
             # 精确命中
             hit = self._entries.get(norm)
-            if hit and hit["fp"] == sources_fp and (now - hit["ts"]) < self.ttl:
+            if hit and (now - hit["ts"]) >= self.ttl:
+                self._entries.pop(norm, None)
+                self._expirations += 1
+                hit = None
+            if hit and hit["fp"] == sources_fp:
                 hit["ts"] = now
                 hit["hits"] = hit.get("hits", 0) + 1
+                self._hits += 1
+                self._exact_hits += 1
                 self._touch(norm)
                 return hit["payload"]
 
@@ -107,7 +123,11 @@ class AnswerCache:
                 q_grams = _char_set(norm)
                 for key in list(self._entries.keys()):
                     e = self._entries[key]
-                    if e["fp"] != sources_fp or (now - e["ts"]) >= self.ttl:
+                    if (now - e["ts"]) >= self.ttl:
+                        self._entries.pop(key, None)
+                        self._expirations += 1
+                        continue
+                    if e["fp"] != sources_fp:
                         continue
                     if e.get("vec") is None or qvec is None:
                         continue
@@ -117,8 +137,11 @@ class AnswerCache:
                         if j >= self.jaccard_floor:
                             e["ts"] = now
                             e["hits"] = e.get("hits", 0) + 1
+                            self._hits += 1
+                            self._similar_hits += 1
                             self._touch(key)
                             return e["payload"]
+            self._misses += 1
         return None
 
     def put(self, query: str, payload: dict, sources_fp: str) -> None:
@@ -140,16 +163,46 @@ class AnswerCache:
             self._touch(norm)
             self._save()
 
-    def invalidate(self) -> None:
+    def invalidate(self) -> int:
         """知识库变化时全清"""
         with self._lock:
+            removed = len(self._entries)
             self._entries.clear()
+            self._invalidations += 1
             self._save()
+            return removed
 
     def stats(self) -> dict:
         with self._lock:
-            return {"entries": len(self._entries),
-                    "hits_total": sum(e.get("hits", 0) for e in self._entries.values())}
+            requests = self._hits + self._misses
+            return {
+                "entries": len(self._entries),
+                "size": len(self._entries),
+                "max_entries": self.max_entries,
+                "ttl_seconds": self.ttl,
+                "hits": self._hits,
+                "hits_total": self._hits,
+                "exact_hits": self._exact_hits,
+                "similar_hits": self._similar_hits,
+                "misses": self._misses,
+                "hit_rate": round(self._hits / requests, 4) if requests else 0.0,
+                "evictions": self._evictions,
+                "expirations": self._expirations,
+                "invalidations": self._invalidations,
+                "similarity_threshold": self.sim_threshold,
+                "jaccard_floor": self.jaccard_floor,
+            }
+
+    def reset_stats(self) -> None:
+        """Reset counters without dropping cached answers."""
+        with self._lock:
+            self._hits = 0
+            self._exact_hits = 0
+            self._similar_hits = 0
+            self._misses = 0
+            self._evictions = 0
+            self._expirations = 0
+            self._invalidations = 0
 
     # ------------------------------------------------------------
     # LRU 辅助
@@ -164,6 +217,7 @@ class AnswerCache:
             return
         oldest = min(self._entries, key=lambda k: self._entries[k].get("_last", 0))
         self._entries.pop(oldest, None)
+        self._evictions += 1
 
     # ------------------------------------------------------------
     # 持久化
@@ -190,7 +244,12 @@ class AnswerCache:
             return
         try:
             ser = json.loads(self.path.read_text(encoding="utf-8"))
-            for k, e in ser.items():
+            now = time.time()
+            items = sorted(ser.items(), key=lambda item: item[1].get("ts", 0), reverse=True)
+            for k, e in items[:self.max_entries]:
+                if now - e.get("ts", 0) >= self.ttl:
+                    self._expirations += 1
+                    continue
                 norm = k
                 self._entries[norm] = {
                     "payload": e["payload"],
@@ -232,9 +291,33 @@ def normalize(query: str) -> str:
 # 指纹
 # ------------------------------------------------------------
 def sources_fingerprint(store) -> str:
-    """已学书集合的指纹。上传/删除书 → 变化 → 缓存失效"""
-    names = sorted(s.get("filename", "") for s in store.list_sources())
-    raw = "|".join(names).encode("utf-8")
+    """Fingerprint persisted knowledge metadata, not just source names.
+
+    Relearning a book under the same filename changes its counts/text length and
+    must invalidate both cached answers and generated indexes.
+    """
+    sources = []
+    for source in store.list_sources():
+        source_dir = Path(getattr(store, "store_dir", "saved_knowledge")) / source.get("id", "")
+        file_state = {}
+        for filename in ("chapters.json", "full_text.txt", "keywords.json",
+                         "data_points.json", "tables.json"):
+            path = source_dir / filename
+            if path.exists():
+                stat = path.stat()
+                file_state[filename] = [stat.st_size, stat.st_mtime_ns]
+        sources.append({
+            "id": source.get("id", ""),
+            "filename": source.get("filename", ""),
+            "chapter_count": source.get("chapter_count", 0),
+            "keyword_count": source.get("keyword_count", 0),
+            "table_count": source.get("table_count", 0),
+            "text_length": source.get("text_length", 0),
+            "learned_at": source.get("learned_at", source.get("updated_at", "")),
+            "files": file_state,
+        })
+    sources.sort(key=lambda item: (item["id"], item["filename"]))
+    raw = json.dumps(sources, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
@@ -247,5 +330,15 @@ _cache: Optional[AnswerCache] = None
 def get_cache() -> AnswerCache:
     global _cache
     if _cache is None:
-        _cache = AnswerCache()
+        try:
+            from app.llm_service import load_config
+            cfg = load_config().get("cache", {}) or {}
+        except Exception:
+            cfg = {}
+        _cache = AnswerCache(
+            max_entries=int(cfg.get("max_entries", 200)),
+            ttl_seconds=int(cfg.get("ttl_seconds", 3600)),
+            sim_threshold=float(cfg.get("sim_threshold", 0.80)),
+            jaccard_floor=float(cfg.get("jaccard_floor", 0.80)),
+        )
     return _cache

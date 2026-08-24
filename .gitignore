@@ -30,6 +30,7 @@ models/
 # ===== 日志 / 输出 =====
 *.log
 tools/*_result.txt
+benchmark_result*.json
 
 # ===== 系统 =====
 Thumbs.db

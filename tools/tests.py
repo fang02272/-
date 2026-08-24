@@ -8,6 +8,7 @@
   python tests.py --e2e        # 仅端到端测试
   python tests.py --tokenize   # 仅Jieba分词与检索测试
   python tests.py --rag-rebuild # 仅持久化知识库RAG重建测试
+  python tests.py --runtime     # 缓存统计/指标/SSE运行时测试
 
 所有测试不调用大模型API，纯本地验证
 """
@@ -495,6 +496,10 @@ if __name__ == "__main__":
 
     if run_all or "--chain" in sys.argv:
         results['chain'] = test_chain_integration()
+
+    if run_all or "--runtime" in sys.argv:
+        from test_runtime_features import run_tests as run_runtime_tests
+        results['runtime'] = run_runtime_tests()
 
     # Summary
     print(f"\n{'='*50}")

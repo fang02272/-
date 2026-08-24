@@ -572,9 +572,13 @@ async function send(text){
   scrollDown();
 
   try{
-    const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
-    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'请求失败')}
-    const d=await r.json();
+    let d=await sendStream(q,ty);
+    // 兼容旧服务或不支持 ReadableStream 的浏览器
+    if(d===null){
+      const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
+      if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'请求失败')}
+      d=await r.json();
+    }
     ty.remove();
     appendExpertCard(d);
   }catch(e){
@@ -584,6 +588,62 @@ async function send(text){
     busy=false;$('#sendbtn').disabled=false;
     $('#qinput').focus();scrollDown();
   }
+}
+
+async function sendStream(q,typingEl){
+  const r=await fetch('/api/query/stream',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})
+  });
+  if(!r.ok){
+    if(r.status===404||r.status===405)return null;
+    const e=await r.json().catch(()=>({}));throw new Error(e.detail||'请求失败');
+  }
+  const ct=r.headers.get('content-type')||'';
+  if(!r.body||!ct.includes('text/event-stream'))return null;
+
+  const reader=r.body.getReader();
+  const decoder=new TextDecoder('utf-8');
+  let buffer='',streamText='',donePayload=null;
+  const dots=typingEl.querySelector('.typing-dots');
+  const label=typingEl.querySelector('.typing-txt');
+
+  const consume=(block)=>{
+    let event='message',data='';
+    block.split('\n').forEach(line=>{
+      if(line.startsWith('event:'))event=line.slice(6).trim();
+      else if(line.startsWith('data:'))data+=line.slice(5).trim();
+    });
+    if(!data)return;
+    let payload;
+    try{payload=JSON.parse(data)}catch(e){return}
+    if(event==='token'){
+      streamText+=payload.text||'';
+      if(dots)dots.style.display='none';
+      if(label){
+        label.style.whiteSpace='pre-wrap';
+        label.style.lineHeight='1.65';
+        label.textContent=streamText;
+      }
+      scrollDown();
+    }else if(event==='done'){
+      donePayload=payload.response||null;
+    }else if(event==='error'){
+      throw new Error(payload.message||'流式请求失败');
+    }
+  };
+
+  while(true){
+    const {value,done}=await reader.read();
+    buffer=(buffer+decoder.decode(value||new Uint8Array(),{stream:!done})).replace(/\r\n/g,'\n');
+    let idx;
+    while((idx=buffer.indexOf('\n\n'))>=0){
+      const block=buffer.slice(0,idx);buffer=buffer.slice(idx+2);consume(block);
+    }
+    if(done)break;
+  }
+  if(buffer.trim())consume(buffer.trim());
+  if(!donePayload)throw new Error('流式响应未正常完成');
+  return donePayload;
 }
 
 /* ============================================================
@@ -808,7 +868,7 @@ function appendExpertCard(d){
   const intentMap={concept:['📖','概念'],parameter:['⚙️','工艺参数'],mixed:['🔀','综合'],other:['🌐','通用']};
   const rI=(d.route&&d.route.intent)||'other';
   const [rIcon,rLabel]=intentMap[rI]||intentMap.other;
-  const modelLabel=({local_expert:'本地专家',cache:'缓存命中',local_knowledge_base:'本地知识库'})[d.model_used]||(d.model_used||'AI');
+  const modelLabel=({local_expert:'本地专家',process_card:'本地工艺卡片',cache:'缓存命中',local_knowledge_base:'本地知识库'})[d.model_used]||(d.model_used||'AI');
 
   el.innerHTML=`
     <div class="msg-avatar">🔬</div>
