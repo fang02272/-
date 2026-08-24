@@ -413,7 +413,9 @@ async def query(req: QueryRequest):
     t3 = time.perf_counter()
     llm = _get_llm()
     llm_text = None
+    llm_attempted = False
     if llm.available:
+        llm_attempted = True
         try:
             llm_text = llm.chat_sync(
                 q,
@@ -485,6 +487,7 @@ async def query(req: QueryRequest):
         model_used=model_used, total_ms=elapsed,
         local_ms=local_ms, rag_ms=rag_ms,
         llm_ms=llm_ms, assembly_ms=assembly_ms,
+        llm_attempted=llm_attempted,
     )
     return QueryResponse(**resp_data)
 
@@ -537,6 +540,27 @@ async def query_stream(req: QueryRequest):
         ]
         qa_system.load_external_knowledge(external_kw_list)
         result = qa_system.generate_structured(q)
+
+        # 本地知识充分 → 直接推送本地内容，不调 LLM
+        if _is_local_sufficient(result):
+            content = result.get("sections", {}).get("science", {}).get("content", "")
+            elapsed = (time.perf_counter() - t0) * 1000
+            cache.set(q, dict(
+                query=q, keywords=result.get("keywords", []),
+                matched_categories=result.get("matched_categories", []),
+                is_cross_domain=result.get("is_cross_domain", False),
+                is_empty=result.get("is_empty", False),
+                model_used="local_knowledge_base", elapsed_ms=round(elapsed, 1),
+                content=content, sections=result.get("sections", {}),
+                mermaid_blocks=[], tables=[],
+                references=result.get("sections", {}).get("sources", {}).get("primary", []),
+                disclaimer=_build_disclaimer(uploaded_names),
+            ))
+            yield f"data: {_json.dumps({'type': 'token', 'token': content}, ensure_ascii=False)}\n\n"
+            yield f"data: {_json.dumps({'type': 'done', 'model_used': 'local_knowledge_base', 'elapsed_ms': round(elapsed, 1)}, ensure_ascii=False)}\n\n"
+            metrics.record_request(model_used="local_knowledge_base", total_ms=elapsed)
+            return
+
         rag_context = _get_rag().build_context(q)
         cross_source_matches = store.search_across_sources(q)
 

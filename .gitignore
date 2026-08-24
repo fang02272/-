@@ -24,5 +24,8 @@ welding_book_full.txt
 *.log
 *.tmp
 
+# 性能测试结果（本地产物，不提交）
+benchmark_result.json
+
 # 任务分工文档
 任务分工/

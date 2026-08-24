@@ -40,24 +40,29 @@ class PerformanceMetrics:
     def record_request(
         self,
         *,
-        model_used: str,       # "llm" | "local_knowledge_base" | "cache"
+        model_used: str,       # "cache" | "local_knowledge_base" | 任意LLM模型名如"deepseek-chat"
         total_ms: float,
         local_ms: float = 0.0,
         rag_ms: float = 0.0,
         llm_ms: float = 0.0,
         assembly_ms: float = 0.0,
         error: bool = False,
+        llm_attempted: bool = False,   # LLM 尝试调用但失败时置 True
         ttft_ms: Optional[float] = None,
     ):
         self._total_requests += 1
         if error:
             self._errors += 1
-        if model_used == "llm":
-            self._llm_calls += 1
-        elif model_used == "cache":
+        if model_used == "cache":
             self._cache_hits_in_requests += 1
-        else:
+        elif model_used == "local_knowledge_base":
             self._local_answers += 1
+        else:
+            # 任何非 cache / local 的值都视为 LLM 成功调用（如 "deepseek-chat"）
+            self._llm_calls += 1
+        # LLM 尝试但失败（降级为本地）也计入 llm_calls
+        if llm_attempted and model_used == "local_knowledge_base":
+            self._llm_calls += 1
 
         self._total_elapsed.append(total_ms)
         if local_ms:

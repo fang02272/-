@@ -503,7 +503,7 @@ async function deleteUpload(filename){
 }
 
 /* ============================================================
-   Send
+   Send — 流式优先，降级非流式
    ============================================================ */
 async function send(text){
   if(busy)return;
@@ -519,17 +519,152 @@ async function send(text){
   scrollDown();
 
   try{
-    const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
-    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'请求失败')}
-    const d=await r.json();
-    ty.remove();
-    appendExpertCard(d);
+    // 尝试流式接口
+    const streamOk = await sendStream(q, ty);
+    if(!streamOk){
+      // 流式不可用，降级为普通接口
+      await sendFull(q, ty);
+    }
   }catch(e){
     ty.remove();
     appendErr(e.message);
   }finally{
     busy=false;$('#sendbtn').disabled=false;
     $('#qinput').focus();scrollDown();
+  }
+}
+
+/* 流式发送，返回 true 表示成功处理（含缓存命中直接返回），false 表示需降级 */
+async function sendStream(q, ty){
+  let r;
+  try{
+    r = await fetch('/api/query/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
+    if(!r.ok) return false;
+  }catch(e){ return false; }
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let tokens = [];
+  let streamCard = null;  // 流式卡片 DOM
+  let streamBody = null;  // 卡片内容 div
+  let firstToken = true;
+  let doneData = null;
+
+  while(true){
+    const {value, done} = await reader.read();
+    if(done) break;
+    buf += decoder.decode(value, {stream:true});
+    const lines = buf.split('\n');
+    buf = lines.pop(); // 保留未完整的行
+
+    for(const line of lines){
+      if(!line.startsWith('data:')) continue;
+      const jsonStr = line.slice(5).trim();
+      if(!jsonStr) continue;
+      try{
+        const evt = JSON.parse(jsonStr);
+        if(evt.type === 'token'){
+          if(firstToken){
+            // 第一个 token 到来：移除 typing，创建流式卡片
+            ty.remove();
+            streamCard = appendStreamCard();
+            streamBody = streamCard.querySelector('.stream-body');
+            firstToken = false;
+          }
+          tokens.push(evt.token);
+          // 实时渲染 Markdown
+          const md = tokens.join('');
+          if(typeof marked !== 'undefined'){
+            streamBody.innerHTML = marked.parse(md);
+          } else {
+            streamBody.textContent = md;
+          }
+          scrollDown();
+        } else if(evt.type === 'done'){
+          doneData = evt;
+        } else if(evt.type === 'error'){
+          ty.remove();
+          appendErr(evt.message || '流式响应出错');
+          return true;
+        }
+      }catch(e){}
+    }
+  }
+
+  // 流结束后最终渲染
+  if(streamCard && tokens.length > 0){
+    const fullText = tokens.join('');
+    finalizeStreamCard(streamCard, fullText, doneData);
+  } else if(firstToken){
+    // 没收到任何 token，说明可能是缓存命中或空响应
+    ty.remove();
+  }
+  return true;
+}
+
+/* 创建流式消息卡片（骨架，内容由 tokens 动态填充）*/
+function appendStreamCard(){
+  const el = document.createElement('div');
+  el.className = 'msg bot';
+  el.innerHTML = `
+    <div class="msg-avatar">🔬</div>
+    <div class="msg-content" style="max-width:100%">
+      <div class="expert-card">
+        <div class="card-header">
+          <div class="card-header-left"><span class="exp">🔍 AI焊接工艺专家</span></div>
+          <span class="card-model stream-model">⏳ 生成中…</span>
+        </div>
+        <div class="card-body stream-body"></div>
+      </div>
+    </div>`;
+  $('#messages').appendChild(el);
+  return el;
+}
+
+/* 流式结束后：渲染 Mermaid、加元信息 */
+function finalizeStreamCard(el, fullText, doneData){
+  const modelEl = el.querySelector('.stream-model');
+  if(modelEl && doneData){
+    modelEl.textContent = `${doneData.model_used||''} · ${(doneData.elapsed_ms||0).toFixed(0)}ms`;
+  }
+  // 触发 Mermaid 渲染（复用 appendExpertCard 里的逻辑）
+  setTimeout(async ()=>{
+    el.querySelectorAll('code.language-mermaid').forEach(async (codeEl)=>{
+      try{
+        const code = codeEl.textContent;
+        if(!code||code.trim().length<5) return;
+        const {svg} = await mermaid.render('mermaid-'+Math.random().toString(36).slice(2), code);
+        const wrap = document.createElement('div');
+        wrap.className = 'mermaid-wrap';
+        wrap.innerHTML = `<div class="mermaid-label">📊 工艺流程图</div>${svg}`;
+        const pre = codeEl.closest('pre');
+        if(pre) pre.replaceWith(wrap); else codeEl.replaceWith(wrap);
+      }catch(e){}
+    });
+    el.querySelectorAll('table').forEach(tbl=>{
+      if(!tbl.closest('.md-table-wrap')){
+        const wrap = document.createElement('div');
+        wrap.className = 'md-table-wrap';
+        tbl.parentNode.insertBefore(wrap, tbl);
+        wrap.appendChild(tbl);
+      }
+    });
+    scrollDown();
+  }, 200);
+}
+
+/* 降级：普通非流式请求 */
+async function sendFull(q, ty){
+  try{
+    const r = await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
+    if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'请求失败')}
+    const d = await r.json();
+    ty.remove();
+    appendExpertCard(d);
+  }catch(e){
+    ty.remove();
+    appendErr(e.message);
   }
 }
 
