@@ -288,6 +288,18 @@ class VectorIndex:
             np.save(tmp_npy, matrix)
             os.replace(tmp_npy, self.index_dir / "index.npy")
 
+            # 语义向量持久化（模型可用时），避免启动时重新编码
+            sem = getattr(self, "_sem_vecs", None)
+            if sem and any(v is not None for v in sem):
+                ref = next(v for v in sem if v is not None)
+                sem_matrix = np.stack([
+                    v if v is not None else np.zeros(ref.shape, dtype=np.float32)
+                    for v in sem
+                ]).astype(np.float32)
+                tmp_sem = self.index_dir / "sem_vecs.tmp.npy"
+                np.save(tmp_sem, sem_matrix)
+                os.replace(tmp_sem, self.index_dir / "sem_vecs.npy")
+
             for name, data in (
                 ("ids", self.ids),
                 ("meta", self.meta),
@@ -317,8 +329,16 @@ class VectorIndex:
             if matrix.shape[0] != len(self.ids) or matrix.shape[1] != self.dim:
                 return False
             self._vecs = [matrix[i] for i in range(matrix.shape[0])]
-            # 语义向量：加载后懒重建（模型可用时 batch 编码）
+            # 语义向量：优先从磁盘加载（秒级），缺失时懒重建
             self._sem_vecs = [None] * len(self.ids)
+            sem_p = self.index_dir / "sem_vecs.npy"
+            if sem_p.exists():
+                try:
+                    sem_matrix = np.load(sem_p)
+                    if sem_matrix.shape[0] == len(self.ids):
+                        self._sem_vecs = [sem_matrix[i] for i in range(sem_matrix.shape[0])]
+                except Exception:
+                    self._sem_vecs = [None] * len(self.ids)
             return True
         except Exception:
             return False
