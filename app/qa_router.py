@@ -18,11 +18,15 @@ try:
         WELDING_PROCESS_PARAMS,
         MATERIAL_PARAM_MAP,
         ELECTRODE_PARAM_TABLE,
+        KEYWORD_CATEGORY_MAP,
+        TERM_ALIAS_MAP,
     )
 except ImportError:
     WELDING_PROCESS_PARAMS = {}
     MATERIAL_PARAM_MAP = {}
     ELECTRODE_PARAM_TABLE = {}
+    KEYWORD_CATEGORY_MAP = {}
+    TERM_ALIAS_MAP = {}
 
 
 class QueryIntent(str, Enum):
@@ -37,7 +41,7 @@ class QueryIntent(str, Enum):
 # ------------------------------------------------------------
 _PARAM_TERMS = [
     "电流", "电压", "焊速", "焊接速度", "送丝速度", "预热", "预热温度", "层间温度",
-    "后热", "焊后热处理", "热输入", "线能量", "保护气流量", "气体流量", "干伸长",
+    "后热", "焊后热处理", "热输入", "线能量", "保护气流量", "气体流量", "流量", "干伸长",
     "板厚", "焊条直径", "焊丝直径", "焊材", "焊条", "焊丝", "牌号", "参数",
     "怎么选", "选多大", "电流多大", "电压多大", "焊接参数", "工艺参数",
     "电流范围", "电压范围", "选用", "选择", "推荐", "怎么焊", "如何焊", "焊接规范",
@@ -47,6 +51,7 @@ _CONCEPT_MARKERS = [
     "是什么", "什么是", "定义", "概念", "原理", "机理", "为什么", "为何",
     "区别", "分类", "介绍", "解释", "讲一下", "包括", "作用", "含义",
     "指什么", "什么意思", "有哪些", "什么叫", "何为", "啥是", "特点是",
+    "特点", "特性",
 ]
 
 # 材料：基座 9 材料 + 牌号 + 基础标识（Q345/16Mn）+ 常见名
@@ -85,9 +90,24 @@ _PROCESS_ALIASES = [
 ]
 _PROCESS_NAMES = sorted(set(_PROCESS_NAMES + _PROCESS_ALIASES), key=len, reverse=True)
 
+# 领域词表（概念问题域内判定）：关键词表 + 同义词键和别名
+_DOMAIN_LEXICON = []
+for _t in KEYWORD_CATEGORY_MAP:
+    if len(str(_t)) >= 2:
+        _DOMAIN_LEXICON.append(str(_t))
+for _k, _aliases in TERM_ALIAS_MAP.items():
+    if len(str(_k)) >= 2:
+        _DOMAIN_LEXICON.append(str(_k))
+    for _a in _aliases:
+        if len(str(_a)) >= 2:
+            _DOMAIN_LEXICON.append(str(_a))
+_DOMAIN_LEXICON = sorted(set(_DOMAIN_LEXICON), key=len, reverse=True)
+
 _THICKNESS_RE = re.compile(r'(\d+(?:\.\d+)?)\s*(?:mm|㎜)')
 _UNIT_RE = re.compile(r'\d+(?:\.\d+)?\s*(?:A|V|W|kW|°C|℃|MPa|GPa|L/min|cm/min|m/min|kJ/mm|mm/s)')
 _ELECTRODE_RE = re.compile(r'(?:焊条|焊丝|焊材)?\s*[A-Z]{1,3}\d{2,4}[A-Z0-9\-]*')
+# 参数疑问词：参数词 + 疑问词 → 参数问题（如 "焊接速度一般多少"、"焊条直径怎么选"）
+_QWORD_RE = re.compile(r'多少|多大|多高|怎么|如何|范围')
 
 
 class QARouter:
@@ -106,7 +126,8 @@ class QARouter:
         elif sig["param"]:
             intent = QueryIntent.PARAMETER
         elif sig["concept"]:
-            intent = QueryIntent.CONCEPT
+            # 域内护栏：有概念信号但无任何焊接领域词 → 不算焊接概念问题（走 LLM 兜底）
+            intent = QueryIntent.CONCEPT if self._in_domain(query, sig) else QueryIntent.OTHER
         else:
             intent = QueryIntent.OTHER
 
@@ -165,16 +186,21 @@ class QARouter:
         }
 
     def _signals(self, query: str, extracted: Dict) -> Dict:
-        has_param_term = len(extracted["param_terms"]) >= 1
+        proc = extracted.get("process")
+        # 排除被工艺名包含的参数词（如 "焊条电弧焊" 里的 "焊条" 不是参数信号）
+        param_terms = [t for t in extracted["param_terms"]
+                       if not (proc and t in proc)]
+        has_param_term = len(param_terms) >= 1
         has_material = bool(extracted["materials"])
         has_thickness = extracted["thickness"] is not None
-        has_process = extracted["process"] is not None
+        has_process = proc is not None
         has_unit = bool(_UNIT_RE.search(query))
+        has_qword = bool(_QWORD_RE.search(query))
         # 参数信号：
-        #  ① 显式参数词 + 材料/板厚/工艺/单位 任一
+        #  ① 显式参数词 + 材料/板厚/工艺/单位/参数疑问词(多少/多大/怎么/如何/范围) 任一
         #  ② 工艺 + (材料或板厚) 组合（如 "304不锈钢 3mm TIG焊"）
         #  ③ 材料 + 板厚 组合（如 "Q345 12mm"）
-        param = (has_param_term and (has_material or has_thickness or has_process or has_unit)) \
+        param = (has_param_term and (has_material or has_thickness or has_process or has_unit or has_qword)) \
                 or (has_process and (has_material or has_thickness)) \
                 or (has_material and has_thickness)
         concept = any(marker in query for marker in _CONCEPT_MARKERS)
@@ -186,7 +212,15 @@ class QARouter:
             "has_thickness": has_thickness,
             "has_process": has_process,
             "has_unit": has_unit,
+            "has_qword": has_qword,
         }
+
+    def _in_domain(self, query: str, sig: Dict) -> bool:
+        """概念问题域内判定：命中材料/工艺/参数/单位信号，或查询含焊接领域词"""
+        if sig["has_param_term"] or sig["has_material"] or sig["has_process"] \
+                or sig["has_thickness"] or sig["has_unit"]:
+            return True
+        return any(w in query for w in _DOMAIN_LEXICON)
 
     # ------------------------------------------------------------
     # 置信度（结合专家库命中，阈值由 config 提供）

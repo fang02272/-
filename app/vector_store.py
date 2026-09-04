@@ -29,6 +29,7 @@ except ImportError:
 # ------------------------------------------------------------
 _DOMAIN_TERMS: set = set()
 _ALIAS_REVERSE: Dict[str, str] = {}
+_ALIAS_MATCH: Dict[str, str] = {}
 try:
     from app.welding_knowledge_base import KEYWORD_CATEGORY_MAP, TERM_ALIAS_MAP
     _DOMAIN_TERMS = {t for t in KEYWORD_CATEGORY_MAP if len(str(t)) >= 2}
@@ -37,6 +38,13 @@ try:
             _a = str(_a).strip()
             if _a and _a not in _ALIAS_REVERSE:
                 _ALIAS_REVERSE[_a] = str(_canonical)
+    # 匹配表：原文 + 小写双登记（tokenize 会先把问句 lower()，
+    # 'ESW'/'Ar气'/'Cr-Mo钢' 等含字母别名必须小写后才比对得上）
+    for _a, _canon in _ALIAS_REVERSE.items():
+        _ALIAS_MATCH[_a] = _canon
+        _al = _a.lower()
+        if _al != _a:
+            _ALIAS_MATCH.setdefault(_al, _canon)
 except ImportError:
     pass
 
@@ -97,10 +105,13 @@ def tokenize(text: str) -> List[str]:
     for term in _DOMAIN_TERMS:
         if term in text:
             tokens.extend([f"T:{term}"] * 3)
-    # 2. 别名反查规范词（加权×3）
-    for alias, canonical in _ALIAS_REVERSE.items():
+    # 2. 别名反查规范词（加权×3；别名命中且规范词未原文出现时，补发规范词术语 token
+    #    —— 保证"规范词只存在于库文、别名只出现在问句"时查询与文档仍可对齐）
+    for alias, canonical in _ALIAS_MATCH.items():
         if alias in text:
             tokens.extend([f"A:{canonical}"] * 3)
+            if len(str(canonical)) >= 2 and canonical not in text:
+                tokens.extend([f"T:{canonical}"] * 2)
     # 3. 型号/钢号/牌号（大写去空格，加权×2）
     for m in _MODEL_RE.findall(text):
         tokens.extend([f"M:{m.upper().replace(' ', '')}"] * 2)
@@ -147,6 +158,12 @@ def feature_vec(text: str, dim: int = 4096):
 # ------------------------------------------------------------
 _sem_model = None
 _SEM_DIM = 512
+
+# 检索融合权重（特征 / 语义）——Day4 调优定稿 0.5/0.5
+# 扫描结论（近义一致率 50 条集）：0.7/0.3→87.8%*，0.5/0.5→98.0%，0.45/0.55→98.0%，
+# 0.4/0.6 起回落（ESW 等缩写须靠特征别名 token，bge 无法编码）。*原锚点口径
+_FUSION_FEAT_W = 0.5
+_FUSION_SEM_W = 0.5
 
 
 def _get_sem_model():
@@ -260,10 +277,10 @@ class VectorIndex:
             if sem_mask:
                 sem_matrix = np.stack([self._sem_vecs[i] for i in sem_mask]).astype(np.float32)
                 sem_scores = sem_matrix @ qsem
-                # 特征 0.7 + 语义 0.3 融合
+                # 特征权重 + 语义权重 融合（权重为模块常量 _FUSION_*_W，可调）
                 for rank, i in enumerate(sem_mask):
                     if len(self.ids) > 0:
-                        scores[i] = 0.7 * scores[i] + 0.3 * sem_scores[rank]
+                        scores[i] = _FUSION_FEAT_W * scores[i] + _FUSION_SEM_W * sem_scores[rank]
 
         top = int(min(top_k, len(self.ids)))
         if top <= 0:
@@ -287,6 +304,18 @@ class VectorIndex:
             tmp_npy = self.index_dir / "index.tmp.npy"
             np.save(tmp_npy, matrix)
             os.replace(tmp_npy, self.index_dir / "index.npy")
+
+            # 语义向量持久化（模型可用时），避免启动时重新编码
+            sem = getattr(self, "_sem_vecs", None)
+            if sem and any(v is not None for v in sem):
+                ref = next(v for v in sem if v is not None)
+                sem_matrix = np.stack([
+                    v if v is not None else np.zeros(ref.shape, dtype=np.float32)
+                    for v in sem
+                ]).astype(np.float32)
+                tmp_sem = self.index_dir / "sem_vecs.tmp.npy"
+                np.save(tmp_sem, sem_matrix)
+                os.replace(tmp_sem, self.index_dir / "sem_vecs.npy")
 
             for name, data in (
                 ("ids", self.ids),
@@ -317,8 +346,16 @@ class VectorIndex:
             if matrix.shape[0] != len(self.ids) or matrix.shape[1] != self.dim:
                 return False
             self._vecs = [matrix[i] for i in range(matrix.shape[0])]
-            # 语义向量：加载后懒重建（模型可用时 batch 编码）
+            # 语义向量：优先从磁盘加载（秒级），缺失时懒重建
             self._sem_vecs = [None] * len(self.ids)
+            sem_p = self.index_dir / "sem_vecs.npy"
+            if sem_p.exists():
+                try:
+                    sem_matrix = np.load(sem_p)
+                    if sem_matrix.shape[0] == len(self.ids):
+                        self._sem_vecs = [sem_matrix[i] for i in range(sem_matrix.shape[0])]
+                except Exception:
+                    self._sem_vecs = [None] * len(self.ids)
             return True
         except Exception:
             return False
