@@ -232,9 +232,21 @@ def normalize(query: str) -> str:
 # 指纹
 # ------------------------------------------------------------
 def sources_fingerprint(store) -> str:
-    """已学书集合的指纹。上传/删除书 → 变化 → 缓存失效"""
-    names = sorted(s.get("filename", "") for s in store.list_sources())
-    raw = "|".join(names).encode("utf-8")
+    """知识库指纹：已学书文件名集合 + 专家库文件状态。
+
+    上传/删除书 → 指纹变化 → 缓存失效。
+    追加 expert_kb.json 的 mtime+size：build_expert_kb.py 重建专家库后书名集合不变、
+    知识内容却已更新，若不纳入指纹，缓存会继续返回旧专家库时代的答案
+    （2026-08-27 旧答案事故根因，修复于 Day5）。
+    """
+    parts = sorted(s.get("filename", "") for s in store.list_sources())
+    try:
+        kb_p = Path(__file__).resolve().parent.parent / "saved_knowledge" / "expert_kb.json"
+        st = kb_p.stat()
+        parts.append(f"expert_kb:{st.st_mtime_ns}:{st.st_size}")
+    except Exception:
+        pass  # 文件不存在时退化为纯书名指纹（不影响正确性）
+    raw = "|".join(parts).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
@@ -244,8 +256,24 @@ def sources_fingerprint(store) -> str:
 _cache: Optional[AnswerCache] = None
 
 
+def _build_cache() -> AnswerCache:
+    """从 config.yaml 的 cache: 段构造缓存（v2.6 起配置化，替代硬编码默认值）"""
+    kwargs = {}
+    try:
+        from app.llm_service import load_config
+        cfg = load_config() or {}
+        c = cfg.get("cache") or {}
+        if isinstance(c, dict):
+            for key in ("max_entries", "ttl_seconds", "sim_threshold", "jaccard_floor"):
+                if key in c and c[key] is not None:
+                    kwargs[key] = c[key]
+    except Exception:
+        pass
+    return AnswerCache(**kwargs)
+
+
 def get_cache() -> AnswerCache:
     global _cache
     if _cache is None:
-        _cache = AnswerCache()
+        _cache = _build_cache()
     return _cache
