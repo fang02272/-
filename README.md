@@ -1,4 +1,4 @@
-# 焊接工艺专家系统 v2.7
+# 焊接工艺专家系统 v2.8
 
 这是一个面向焊接知识问答、工艺参数推荐和机器人焊接工艺卡片生成的本地专家系统。项目以 `saved_knowledge` 中已经学习的书籍为知识底座，优先在本地完成检索、路由和结构化回答；只有本地证据不足并且配置了 LLM 时，才调用 OpenAI 兼容接口补充答案。
 
@@ -8,10 +8,10 @@
 
 - 多书知识库：保存 PDF 全文、章节、关键词、表格和数据点。
 - Jieba 分词：注册焊接专业词，使用搜索模式多粒度分词，替代机械的中文单双字切分。
-- 本地检索：关键词匹配、跨书章节检索、特征向量余弦检索和可选语义向量增强。
+- 本地检索：关键词匹配、跨书章节检索、特征向量余弦检索和可选语义向量增强；对乱码、短文本和重复章节统一评分、过滤或降权。
 - 专家知识库：把规范概念、别名、定义、应用场景和来源整理为可查询条目。
 - 意图路由：区分概念、工艺参数、综合和通用问题。
-- 工艺卡片：输出母材、板厚、坡口、电参数、热参数、机器人参数、质量检查及装备信息等机器可读 JSON。
+- 工艺卡片：输出母材、板厚、坡口、电参数、热参数、机器人参数、质量检查及装备信息等机器可读 JSON，并标注输入完整度、待确认项和逐参数来源。
 - 本地优先：高置信答案或已生成工艺卡片时不调用 LLM。
 - LLM 兜底：只注入命中的薄目录和少量相关原文，默认最多生成 2000 Token。
 - 答案缓存：LRU + TTL + 相似问题命中，知识源变化后自动失效。
@@ -42,6 +42,8 @@
 答案缓存：规范化后做精确命中或相似命中
   ↓ 未命中
 本地分析：关键词、类别、跨书章节
+  ↓
+检索质量控制：严重噪声过滤、轻度问题降权、重复章节合并、可读摘要
   ↓
 专家概念库 + 向量检索
   ↓
@@ -112,6 +114,7 @@ PyCharmMiscProject/
 │   ├── process_card.py          # 工艺卡片组装
 │   ├── qa_router.py             # 意图、置信度和参数匹配
 │   ├── rag_retriever.py         # Jieba + TF-IDF 检索器
+│   ├── retrieval_quality.py      # RAG内容质量评分、摘要与去重
 │   ├── robot_welding.py         # 机器人焊接规则
 │   ├── vector_store.py          # NumPy 向量索引
 │   ├── welding_knowledge_base.py# 焊接术语、类别和参数基座
@@ -124,6 +127,7 @@ PyCharmMiscProject/
 │   ├── gpu_ingest.py            # GPU OCR 入库
 │   ├── inspect_knowledge.py     # 知识库检查
 │   ├── run_welding_qa.py        # 命令行问答
+│   ├── test_quality_and_card_features.py # 检索质量/卡片可靠性测试
 │   ├── test_runtime_features.py # 缓存/指标/SSE 回归测试
 │   └── tests.py                 # 完整本地测试集
 ├── requirements.txt
@@ -239,16 +243,26 @@ event: done    data: {"response":{完整 QueryResponse}}
 event: error   data: {"message":"错误信息"}
 ```
 
+工艺卡片新增两个可靠性字段：
+
+- `input_completeness`：母材、板厚、工艺的完整度、置信等级、缺失字段、系统假设和是否需要确认；
+- `parameter_sources`：关键参数分别标记为用户输入、卡诺普实测、知识库参数、工艺规则、系统默认或待补充。
+
+只要存在缺失输入或默认假设，Web、打印版和命令行都会提示“补充信息后重新生成”，避免把通用建议误当成已确认生产参数。
+
 ## 8. 测试与性能基准
 
 所有默认测试都不调用 LLM：
 
 ```powershell
-# 完整测试：分词、知识完整性、匹配、跨书、端到端、归一化、链路、运行时
+# 完整测试：分词、知识完整性、匹配、跨书、端到端、归一化、链路、运行时、质量与卡片
 .\.venv\Scripts\python.exe tools\tests.py
 
 # 只测试缓存统计、性能指标和 SSE
 .\.venv\Scripts\python.exe tools\tests.py --runtime
+
+# 只测试检索质量控制与工艺卡可靠性
+.\.venv\Scripts\python.exe tools\tests.py --quality
 
 # 语法编译检查
 .\.venv\Scripts\python.exe -m compileall -q app server.py

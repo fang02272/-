@@ -39,7 +39,7 @@ from app.metrics_service import get_metrics
 app = FastAPI(
     title="焊接工艺专家系统",
     description="LLM驱动的焊接知识智能问答 + 专家知识库 + 本地向量库 + 意图路由",
-    version="2.7.0",
+    version="2.8.0",
 )
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
@@ -328,10 +328,32 @@ def _assemble_card_sections(plan: dict, result: dict) -> dict:
     th = card.get("thermal", {})
     jp = card.get("joint_prep", {})
     pp = card.get("pass_plan", {})
+    completeness = card.get("input_completeness", {})
+    parameter_sources = card.get("parameter_sources", {})
 
-    assume_note = "（工艺未指定，默认焊条电弧焊基线）" if card.get("process_assumed") else ""
+    def source_label(path: str) -> str:
+        source = parameter_sources.get(path, {})
+        detail = source.get("detail", "")
+        return f"{source.get('label', '未标注')}" + (f"（{detail}）" if detail else "")
+
+    missing_labels = "、".join(item.get("label", "") for item in completeness.get("missing_fields", []))
+    pending_labels = "、".join(item.get("label", "") for item in completeness.get("pending_confirmation_items", []))
+    warning_md = ""
+    if completeness.get("requires_confirmation"):
+        warning_reason = (
+            f"缺少 {missing_labels}。" if missing_labels else
+            f"以下参数仍待确认：{pending_labels or '默认参数'}。"
+        )
+        warning_md = (
+            f"> ⚠️ **工艺卡待确认**：{warning_reason}"
+            f"{completeness.get('message', '')}\n\n"
+        )
+
+    assume_note = "（工艺未指定，暂用 GMAW/MIG 机器人焊接基线，需确认）" if card.get("process_assumed") else ""
     plan_md = (
-        f"**母材**：{card.get('base_material','')}　**板厚**：{card.get('thickness_mm','')}mm　"
+        warning_md
+        + f"**母材**：{card.get('base_material') or '待补充'}　"
+        f"**板厚**：{str(card.get('thickness_mm')) + 'mm' if card.get('thickness_mm') is not None else '待补充'}　"
         f"**工艺**：{card.get('process','')}{assume_note}\n\n"
         f"### 坡口与装配\n"
         f"- 坡口形式：{card.get('groove','')}\n"
@@ -340,13 +362,13 @@ def _assemble_card_sections(plan: dict, result: dict) -> dict:
         f"- 定位焊：{jp.get('tack_weld','')}\n"
         f"- 焊接位置：{card.get('welding_position','')}\n\n"
         f"### 焊接参数\n"
-        f"| 参数 | 建议值 |\n|---|---|\n"
-        f"| 焊接电流 | {ele.get('current_a','')} |\n"
-        f"| 电弧电压 | {ele.get('voltage_v','')} |\n"
-        f"| 焊接速度 | {ele.get('travel_speed_cm_min','')} |\n"
-        f"| 焊材 | {card.get('consumables','')} |\n"
-        f"| 焊条/焊丝直径 | {card.get('electrode_diameter','')} |\n"
-        f"| 保护气体 | {card.get('shielding_gas','')} |\n\n"
+        f"| 参数 | 建议值 | 来源 |\n|---|---|---|\n"
+        f"| 焊接电流 | {ele.get('current_a','') or '待确认'} | {source_label('electrical.current_a')} |\n"
+        f"| 电弧电压 | {ele.get('voltage_v','') or '待确认'} | {source_label('electrical.voltage_v')} |\n"
+        f"| 焊接速度 | {ele.get('travel_speed_cm_min','') or '待确认'} | {source_label('electrical.travel_speed_cm_min')} |\n"
+        f"| 焊材 | {card.get('consumables','') or '待确认'} | {source_label('consumables')} |\n"
+        f"| 焊条/焊丝直径 | {card.get('electrode_diameter','') or '待确认'} | {source_label('electrode_diameter')} |\n"
+        f"| 保护气体 | {card.get('shielding_gas','') or '待确认'} | {source_label('shielding_gas')} |\n\n"
         f"### 热管理\n"
         f"- 预热：{th.get('preheat','')}\n"
         f"- 层间温度：{th.get('interpass_temp','')}\n"
@@ -594,7 +616,7 @@ async def health():
     llm = _get_llm()
     return {
         "status": "ok",
-        "service": "焊接工艺专家系统 v2.7",
+        "service": "焊接工艺专家系统 v2.8",
         "llm_available": llm.available,
         "llm_model": llm.model if llm.available else None,
     }
@@ -1308,7 +1330,7 @@ async def root():
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
         return FileResponse(str(index_path))
-    return JSONResponse({"message": "焊接工艺专家系统 API v2.7", "docs": "/docs"}, status_code=200)
+    return JSONResponse({"message": "焊接工艺专家系统 API v2.8", "docs": "/docs"}, status_code=200)
 
 
 if STATIC_DIR.exists():

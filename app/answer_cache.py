@@ -19,6 +19,7 @@ from typing import Dict, Optional
 from app.vector_store import feature_vec
 
 _CN_CHAR_RE = None  # 延迟构造
+CACHE_SCHEMA_VERSION = 2
 
 
 def _char_set(s: str) -> set:
@@ -41,6 +42,21 @@ def _jaccard(a: set, b: set) -> float:
     inter = len(a & b)
     union = len(a | b)
     return inter / union if union else 0.0
+
+
+def _parameter_signature(query: str) -> Optional[dict]:
+    """提取会改变工艺卡的关键输入，防止相似缓存跨槽位复用。"""
+    try:
+        from app.qa_router import get_router
+        extracted = get_router().extract_params(query)
+        return {
+            "materials": sorted(str(x).lower() for x in extracted.get("materials", [])),
+            "thickness": extracted.get("thickness"),
+            "process": str(extracted.get("process") or "").lower(),
+            "electrode": str(extracted.get("electrode") or "").lower(),
+        }
+    except Exception:
+        return None
 
 
 class AnswerCache:
@@ -121,6 +137,7 @@ class AnswerCache:
             if len(norm) >= 4:
                 qvec = feature_vec(norm)
                 q_grams = _char_set(norm)
+                q_param_signature = _parameter_signature(query)
                 for key in list(self._entries.keys()):
                     e = self._entries[key]
                     if (now - e["ts"]) >= self.ttl:
@@ -129,6 +146,10 @@ class AnswerCache:
                         continue
                     if e["fp"] != sources_fp:
                         continue
+                    # 工艺卡只允许在母材/板厚/工艺/焊材输入完全一致时做相似复用。
+                    if e.get("payload", {}).get("process_card"):
+                        if not e.get("param_signature") or e.get("param_signature") != q_param_signature:
+                            continue
                     if e.get("vec") is None or qvec is None:
                         continue
                     cos = float(qvec @ e["vec"])
@@ -157,6 +178,8 @@ class AnswerCache:
                 "vec": feature_vec(norm),
                 "grams": _char_set(norm),
                 "fp": sources_fp,
+                "schema": CACHE_SCHEMA_VERSION,
+                "param_signature": _parameter_signature(query) if payload.get("process_card") else None,
                 "ts": time.time(),
                 "hits": 0,
             }
@@ -191,6 +214,7 @@ class AnswerCache:
                 "invalidations": self._invalidations,
                 "similarity_threshold": self.sim_threshold,
                 "jaccard_floor": self.jaccard_floor,
+                "schema_version": CACHE_SCHEMA_VERSION,
             }
 
     def reset_stats(self) -> None:
@@ -230,6 +254,8 @@ class AnswerCache:
                 ser[k] = {
                     "payload": e["payload"],
                     "fp": e["fp"],
+                    "schema": CACHE_SCHEMA_VERSION,
+                    "param_signature": e.get("param_signature"),
                     "ts": e["ts"],
                     "hits": e.get("hits", 0),
                 }
@@ -247,6 +273,10 @@ class AnswerCache:
             now = time.time()
             items = sorted(ser.items(), key=lambda item: item[1].get("ts", 0), reverse=True)
             for k, e in items[:self.max_entries]:
+                if e.get("schema") != CACHE_SCHEMA_VERSION:
+                    continue
+                if e.get("payload", {}).get("process_card") and not e.get("param_signature"):
+                    continue
                 if now - e.get("ts", 0) >= self.ttl:
                     self._expirations += 1
                     continue
@@ -256,6 +286,8 @@ class AnswerCache:
                     "vec": feature_vec(norm),
                     "grams": _char_set(norm),
                     "fp": e["fp"],
+                    "schema": CACHE_SCHEMA_VERSION,
+                    "param_signature": e.get("param_signature"),
                     "ts": e["ts"],
                     "hits": e.get("hits", 0),
                     "_last": 0,

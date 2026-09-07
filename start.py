@@ -118,7 +118,7 @@ def auto_learn_uploads():
 
 def main():
     print("=" * 55)
-    print("  🔬 焊接工艺专家系统 v2.7")
+    print("  🔬 焊接工艺专家系统 v2.8")
     print("  AI大模型 + 《材料焊接原理》+ PDF知识库")
     print("=" * 55)
     print()

@@ -682,15 +682,35 @@ function renderProcessCard(c){
   if(!c||!c.process)return '';
   const escH=esc;
   const rp=c.robot_params||{}, el=c.electrical||{}, th=c.thermal||{},
-        jp=c.joint_prep||{}, pp=c.pass_plan||{}, qc=c.quality||{};
+        jp=c.joint_prep||{}, pp=c.pass_plan||{}, qc=c.quality||{},
+        complete=c.input_completeness||{}, paramSources=c.parameter_sources||{};
+  const sourceBadge=path=>{
+    const s=paramSources[path]||{};
+    const warning=s.requires_confirmation;
+    const detail=s.detail?` title="${escH(s.detail)}"`:'';
+    return `<span${detail} style="display:inline-block;padding:2px 7px;border-radius:12px;font-size:10px;white-space:nowrap;background:${warning?'var(--warning-bg)':'var(--surface-tertiary)'};color:${warning?'var(--warning)':'var(--text-secondary)'}">${escH(s.label||'未标注')}</span>`;
+  };
   let h='';
   // 基本信息条
   h+=`<div style="display:flex;flex-wrap:wrap;gap:6px;padding:12px;background:var(--primary-light);border-radius:10px;margin-bottom:14px">`;
-  h+=`<span style="background:#fff;padding:4px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)">🧱 母材 <b>${escH(c.base_material||'')}</b></span>`;
-  h+=`<span style="background:#fff;padding:4px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)">📏 板厚 <b>${escH(c.thickness_mm==null?'':c.thickness_mm)}mm</b></span>`;
+  h+=`<span style="background:#fff;padding:4px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)">🧱 母材 <b>${escH(c.base_material||'待补充')}</b></span>`;
+  h+=`<span style="background:#fff;padding:4px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)">📏 板厚 <b>${c.thickness_mm==null?'待补充':escH(c.thickness_mm)+'mm'}</b></span>`;
   h+=`<span style="background:#fff;padding:4px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)">🔥 工艺 <b>${escH(c.process)}</b></span>`;
-  if(c.process_assumed)h+=`<span style="padding:4px 10px;border-radius:20px;font-size:11px;background:var(--warning-bg);color:var(--warning)">⚠️ 工艺未指定，默认焊条电弧焊</span>`;
+  if(c.process_assumed)h+=`<span style="padding:4px 10px;border-radius:20px;font-size:11px;background:var(--warning-bg);color:var(--warning)">⚠️ 工艺未指定，暂用 GMAW/MIG 机器人焊接基线</span>`;
   h+='</div>';
+
+  if(complete.requires_confirmation){
+    const missing=(complete.missing_fields||[]).map(x=>x.label).filter(Boolean).join('、');
+    const pending=(complete.pending_confirmation_items||[]).map(x=>x.label).filter(Boolean).join('、');
+    h+=`<div style="padding:11px 13px;margin-bottom:12px;border:1px solid var(--warning);border-radius:9px;background:var(--warning-bg);color:var(--warning);font-size:12px;line-height:1.7">`;
+    h+=`<div><b>⚠️ 输入完整度 ${Math.round((complete.score||0)*100)}%</b>，${missing?'缺少：'+escH(missing):'待确认参数：'+escH(pending||'默认参数')}</div>`;
+    (complete.assumptions||[]).forEach(a=>{h+=`<div>• ${escH(a)}</div>`});
+    h+=`<div style="margin-top:4px"><b>${escH(complete.message||'请补充以上信息后重新生成，生产使用前必须确认。')}</b></div>`;
+    h+=`<button class="topbar-btn" style="margin-top:7px" onclick="document.getElementById('qinput').focus()">补充信息后重新生成</button>`;
+    h+='</div>';
+  }else if(complete.status==='complete'){
+    h+=`<div style="padding:8px 12px;margin-bottom:12px;border-radius:8px;background:var(--success-bg);color:var(--success);font-size:12px">✅ 输入完整度 100%，参数来源已标注，可进入工艺评审。</div>`;
+  }
 
   // 机器人装备
   const eq=c.equipment||{};
@@ -746,10 +766,10 @@ function renderProcessCard(c){
 
   // 焊接参数表
   h+=`<h3 style="margin-top:16px">⚙️ 焊接参数</h3>`;
-  h+=`<div class="md-table-wrap"><table><thead><tr><th>参数</th><th>建议值</th></tr></thead><tbody>`;
-  const elRows=[['焊接电流',el.current_a],['电弧电压',el.voltage_v],['焊接速度',el.travel_speed_cm_min],
-    ['焊材',c.consumables],['焊条/焊丝直径',c.electrode_diameter],['保护气体',c.shielding_gas]];
-  elRows.forEach(([k,v])=>{ if(v)h+=`<tr><td>${k}</td><td>${escH(v)}</td></tr>`; });
+  h+=`<div class="md-table-wrap"><table><thead><tr><th>参数</th><th>建议值</th><th>来源</th></tr></thead><tbody>`;
+  const elRows=[['焊接电流',el.current_a,'electrical.current_a'],['电弧电压',el.voltage_v,'electrical.voltage_v'],['焊接速度',el.travel_speed_cm_min,'electrical.travel_speed_cm_min'],
+    ['焊材',c.consumables,'consumables'],['焊条/焊丝直径',c.electrode_diameter,'electrode_diameter'],['保护气体',c.shielding_gas,'shielding_gas']];
+  elRows.forEach(([k,v,path])=>{ h+=`<tr><td>${k}</td><td>${escH(v||'待确认')}</td><td>${sourceBadge(path)}</td></tr>`; });
   h+='</tbody></table></div>';
 
   // 工艺方案（坡口/装配/清理/定位焊/焊道）
@@ -967,17 +987,25 @@ $('#qinput').focus();
 function buildCardPrintHtml(c){
   const H=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   const el=c.electrical||{}, th=c.thermal||{}, jp=c.joint_prep||{}, pp=c.pass_plan||{},
-        qc=c.quality||{}, rp=c.robot_params||{}, eq=c.equipment||{};
+        qc=c.quality||{}, rp=c.robot_params||{}, eq=c.equipment||{},
+        complete=c.input_completeness||{}, paramSources=c.parameter_sources||{};
   const row=(k,v)=>v?`<tr><th style="width:30%;background:#f2f2f2">${H(k)}</th><td>${H(v)}</td></tr>`:'';
+  const sourceRow=(k,v,path)=>{const s=paramSources[path]||{};return `<tr><th style="width:27%;background:#f2f2f2">${H(k)}</th><td>${H(v||'待确认')}</td><td style="width:22%">${H(s.label||'未标注')}</td></tr>`};
   let h=`<div class="pc-print-body" style="font-family:'Microsoft YaHei',sans-serif">`;
   h+=`<h1 style="text-align:center;font-size:18px;margin:0 0 4px">焊接工艺卡片 / WELDING PROCESS CARD</h1>`;
   h+=`<div style="text-align:center;font-size:11px;color:#555;margin-bottom:12px">焊接工艺专家系统 · 工艺编号 ${new Date().toISOString().slice(0,10)}</div>`;
+  if(complete.requires_confirmation){
+    const missing=(complete.missing_fields||[]).map(x=>x.label).filter(Boolean).join('、');
+    const pending=(complete.pending_confirmation_items||[]).map(x=>x.label).filter(Boolean).join('、');
+    const reason=missing?`缺少 ${H(missing)}`:`待确认参数：${H(pending||'默认参数')}`;
+    h+=`<div style="border:1px solid #b45309;background:#fff7ed;color:#9a3412;padding:7px 10px;margin-bottom:10px;font-size:11px"><b>待确认：</b>${reason}。${H(complete.message||'请补充信息后重新生成。')}</div>`;
+  }
 
   // 基本信息
   h+=`<div class="pc-block"><h2 style="font-size:14px;border-bottom:2px solid #333;padding-bottom:3px">1️⃣ 基本信息</h2>`;
   h+=`<table><tbody>`;
-  h+=row('母材 Base Material', c.base_material);
-  h+=row('板厚 Thickness', c.thickness_mm==null?'':String(c.thickness_mm)+'mm');
+  h+=row('母材 Base Material', c.base_material||'待补充');
+  h+=row('板厚 Thickness', c.thickness_mm==null?'待补充':String(c.thickness_mm)+'mm');
   h+=row('焊接方法 Process', c.process);
   h+=row('坡口形式 Groove', c.groove);
   h+=row('装配间隙 Joint Gap', c.joint_gap_mm);
@@ -987,13 +1015,13 @@ function buildCardPrintHtml(c){
 
   // 焊接参数
   h+=`<div class="pc-block"><h2 style="font-size:14px;border-bottom:2px solid #333;padding-bottom:3px">2️⃣ 焊接参数</h2>`;
-  h+=`<table><tbody>`;
-  h+=row('焊接电流 Current', el.current_a);
-  h+=row('电弧电压 Voltage', el.voltage_v);
-  h+=row('焊接速度 Travel Speed', el.travel_speed_cm_min);
-  h+=row('焊材 Consumables', c.consumables);
-  h+=row('焊条/焊丝直径 Electrode', c.electrode_diameter);
-  h+=row('保护气体 Shielding Gas', c.shielding_gas);
+  h+=`<table><thead><tr><th>参数</th><th>建议值</th><th>来源</th></tr></thead><tbody>`;
+  h+=sourceRow('焊接电流 Current', el.current_a,'electrical.current_a');
+  h+=sourceRow('电弧电压 Voltage', el.voltage_v,'electrical.voltage_v');
+  h+=sourceRow('焊接速度 Travel Speed', el.travel_speed_cm_min,'electrical.travel_speed_cm_min');
+  h+=sourceRow('焊材 Consumables', c.consumables,'consumables');
+  h+=sourceRow('焊条/焊丝直径 Electrode', c.electrode_diameter,'electrode_diameter');
+  h+=sourceRow('保护气体 Shielding Gas', c.shielding_gas,'shielding_gas');
   h+='</tbody></table></div>';
 
   // 机器人参数

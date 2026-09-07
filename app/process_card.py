@@ -182,13 +182,74 @@ _POSITION_HINT = "平焊(1G)为主，建议机器人姿态：焊枪垂直于坡�
 # ============================================================
 # 卡片构建
 # ============================================================
-def _find_rec(param_match: dict, name: str) -> str:
-    """从推荐行中取值（匹配参数名包含关系）"""
+def _find_rec_entry(param_match: dict, name: str) -> dict:
+    """从推荐行中取完整记录（保留参数来源）。"""
     for r in (param_match or {}).get("recommendations", []):
         rp = str(r.get("param", ""))
         if name in rp or rp in name:
-            return str(r.get("value", ""))
-    return ""
+            return r
+    return {}
+
+
+_SOURCE_LABELS = {
+    "user_input": "用户输入",
+    "measured": "卡诺普实测",
+    "knowledge_base": "知识库参数",
+    "rule_recommendation": "工艺规则推荐",
+    "system_default": "系统默认，需确认",
+    "pending": "待补充/待确认",
+}
+
+
+def _source_info(source_type: str, detail: str = "") -> dict:
+    """构造统一的参数来源标识，供前端、打印和机器人接口共用。"""
+    return {
+        "type": source_type,
+        "label": _SOURCE_LABELS[source_type],
+        "detail": detail,
+        "requires_confirmation": source_type in ("system_default", "pending"),
+    }
+
+
+def _input_completeness(extracted: dict) -> dict:
+    """按生成可靠工艺卡所需的母材、板厚、工艺检查输入完整性。"""
+    specs = (
+        ("material", "母材", bool(extracted.get("materials")), (extracted.get("materials") or [None])[0]),
+        ("thickness", "板厚", extracted.get("thickness") is not None, extracted.get("thickness")),
+        ("process", "焊接工艺", bool(extracted.get("process")), extracted.get("process")),
+    )
+    provided = [
+        {"field": field, "label": label, "value": value}
+        for field, label, present, value in specs if present
+    ]
+    missing = [
+        {"field": field, "label": label, "reason": f"未从问题中识别到{label}"}
+        for field, label, present, _ in specs if not present
+    ]
+    score = len(provided) / len(specs)
+    status = "complete" if not missing else ("partial" if provided else "insufficient")
+    confidence = "high" if score == 1 else ("medium" if score >= 2 / 3 else "low")
+    assumptions = []
+    if any(item["field"] == "material" for item in missing):
+        assumptions.append("母材未知，材料相关的预热、焊材与热处理参数只能作为通用建议。")
+    if any(item["field"] == "thickness" for item in missing):
+        assumptions.append("板厚未知，坡口、装配间隙和层道规划采用通用规则。")
+    if any(item["field"] == "process" for item in missing):
+        assumptions.append("工艺未知，暂用 GMAW/MIG 机器人焊接基线生成参数。")
+    return {
+        "score": round(score, 2),
+        "status": status,
+        "confidence": {"level": confidence, "score": round(score, 2)},
+        "provided_fields": provided,
+        "missing_fields": missing,
+        "assumptions": assumptions,
+        "requires_confirmation": bool(missing),
+        "message": (
+            "输入完整，可进入工艺评审。"
+            if not missing else
+            "当前卡片包含假设或默认值，请补充缺失信息后重新生成，生产使用前必须确认。"
+        ),
+    }
 
 
 def _process_params(process_key: str) -> dict:
@@ -205,6 +266,7 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
     if not param_match or not param_match.get("matched"):
         return None
 
+    completeness = _input_completeness(extracted)
     thickness = extracted.get("thickness")
     material = param_match.get("material") or (extracted.get("materials") or [None])[0]
     process = param_match.get("process")
@@ -213,7 +275,7 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
     if not process and (thickness is not None or material):
         process = ROBOT_DEFAULT_PROCESS
         process_assumed = True
-    electrode = param_match.get("electrode")
+    electrode = extracted.get("electrode") or param_match.get("electrode")
     mp = _material_params(material) if material else {}
     pp = _process_params(process) if process else {}
 
@@ -239,9 +301,17 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
         except Exception:
             weld_case = None
 
-    travel_speed = _find_rec(param_match, "焊速") or pp.get("焊速范围", "")
-    current = _find_rec(param_match, "电流") or pp.get("电流范围", "")
-    voltage = _find_rec(param_match, "电压") or pp.get("电压范围", "")
+    current_rec = _find_rec_entry(param_match, "电流")
+    voltage_rec = _find_rec_entry(param_match, "电压")
+    speed_rec = _find_rec_entry(param_match, "焊速")
+    preheat_rec = _find_rec_entry(param_match, "预热")
+    interpass_rec = _find_rec_entry(param_match, "层间温度")
+    postheat_rec = _find_rec_entry(param_match, "后热")
+    consumables_rec = _find_rec_entry(param_match, "推荐焊材")
+
+    travel_speed = str(speed_rec.get("value", "")) or pp.get("焊速范围", "")
+    current = str(current_rec.get("value", "")) or pp.get("电流范围", "")
+    voltage = str(voltage_rec.get("value", "")) or pp.get("电压范围", "")
     if weld_case:
         if weld_case.get("current"):
             current = f"{weld_case['current']:g}A"
@@ -249,9 +319,9 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
             voltage = f"{weld_case['voltage']:g}V"
         if weld_case.get("speed"):
             travel_speed = f"{weld_case['speed']:g} cm/min"
-    preheat = _find_rec(param_match, "预热") or (mp.get("预热") if isinstance(mp.get("预热"), str) else "")
-    interpass = _find_rec(param_match, "层间温度") or mp.get("层间温度", "")
-    postheat = _find_rec(param_match, "后热") or mp.get("后热", "")
+    preheat = str(preheat_rec.get("value", "")) or (mp.get("预热") if isinstance(mp.get("预热"), str) else "")
+    interpass = str(interpass_rec.get("value", "")) or mp.get("层间温度", "")
+    postheat = str(postheat_rec.get("value", "")) or mp.get("后热", "")
     shielding = ""
     if "GTAW" in (process or "") or "GMAW" in (process or "") or "PAW" in (process or ""):
         shielding = pp.get("保护方式", "Ar 气体保护") or "Ar 气体保护"
@@ -262,15 +332,121 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
     else:
         shielding = pp.get("保护方式", "焊条药皮造渣造气") or "焊条药皮造渣造气"
 
+    def recommendation_source(entry: dict, fallback_detail: str = "") -> dict:
+        if entry:
+            return _source_info("knowledge_base", str(entry.get("source", "")))
+        if fallback_detail:
+            return _source_info("knowledge_base", fallback_detail)
+        return _source_info("pending")
+
+    material_source = (
+        _source_info("user_input", "问题中识别的母材") if extracted.get("materials") else
+        (_source_info("knowledge_base", "材料参数表匹配") if material else _source_info("pending"))
+    )
+    thickness_source = (
+        _source_info("user_input", "问题中识别的板厚") if thickness is not None else _source_info("pending")
+    )
+    process_source = (
+        _source_info("user_input", "问题中识别的焊接工艺") if extracted.get("process") else
+        (_source_info("system_default", "GMAW/MIG 机器人焊接基线") if process_assumed else _source_info("pending"))
+    )
+    current_source = recommendation_source(current_rec, process if current else "")
+    voltage_source = recommendation_source(voltage_rec, process if voltage else "")
+    speed_source = recommendation_source(speed_rec, process if travel_speed else "")
+    if weld_case:
+        if weld_case.get("current"):
+            current_source = _source_info("measured", "材料+板厚+焊缝形式匹配")
+        if weld_case.get("voltage"):
+            voltage_source = _source_info("measured", "材料+板厚+焊缝形式匹配")
+        if weld_case.get("speed"):
+            speed_source = _source_info("measured", "材料+板厚+焊缝形式匹配")
+
+    thickness_rule_source = (
+        _source_info("rule_recommendation", "按板厚规则计算")
+        if thickness is not None else _source_info("system_default", "板厚缺失，采用通用规则")
+    )
+    electrode_source = (
+        _source_info("user_input", "问题中指定的焊条/焊丝直径") if extracted.get("electrode") else
+        (_source_info("rule_recommendation", "电极参数表按板厚匹配") if electrode_mm else _source_info("pending"))
+    )
+    consumables_source = recommendation_source(consumables_rec)
+    shielding_source = (
+        _source_info("knowledge_base", process or "工艺参数表")
+        if pp.get("保护方式") else _source_info("system_default", "按工艺类型给出的通用保护方式")
+    )
+    preheat_source = recommendation_source(preheat_rec, material if preheat else "")
+    interpass_source = recommendation_source(interpass_rec, material if interpass else "")
+    postheat_source = recommendation_source(postheat_rec, material if postheat else "")
+    if not preheat:
+        preheat_source = _source_info("system_default", "通用热管理建议")
+    if not interpass:
+        interpass_source = _source_info("system_default", "通用热管理建议")
+    if not postheat:
+        postheat_source = _source_info("system_default", "通用热管理建议")
+
+    parameter_sources = {
+        "base_material": material_source,
+        "thickness_mm": thickness_source,
+        "process": process_source,
+        "groove": thickness_rule_source,
+        "joint_gap_mm": thickness_rule_source,
+        "welding_position": _source_info("rule_recommendation", "机器人焊接位置规则"),
+        "consumables": consumables_source,
+        "electrode_diameter": electrode_source,
+        "electrical.current_a": current_source,
+        "electrical.voltage_v": voltage_source,
+        "electrical.travel_speed_cm_min": speed_source,
+        "thermal.preheat": preheat_source,
+        "thermal.interpass_temp": interpass_source,
+        "thermal.postheat": postheat_source,
+        "shielding_gas": shielding_source,
+        "pass_plan.layers_passes": thickness_rule_source,
+        "pass_plan.weaving": thickness_rule_source,
+        "robot_params.travel_speed": speed_source,
+        "robot_params.gun_angle": _source_info("rule_recommendation", "按焊接工艺计算"),
+        "robot_params.stick_out": _source_info("rule_recommendation", "按焊接工艺计算"),
+    }
+    parameter_labels = {
+        "process": "焊接工艺",
+        "consumables": "焊材",
+        "electrode_diameter": "焊条/焊丝直径",
+        "electrical.current_a": "焊接电流",
+        "electrical.voltage_v": "电弧电压",
+        "electrical.travel_speed_cm_min": "焊接速度",
+        "thermal.preheat": "预热",
+        "thermal.interpass_temp": "层间温度",
+        "thermal.postheat": "后热",
+        "shielding_gas": "保护气体",
+        "groove": "坡口形式",
+        "joint_gap_mm": "装配间隙",
+        "pass_plan.layers_passes": "层道规划",
+    }
+    pending_items = [
+        {
+            "parameter": path,
+            "label": parameter_labels.get(path, path),
+            "source": source["label"],
+            "detail": source.get("detail", ""),
+        }
+        for path, source in parameter_sources.items()
+        if source.get("requires_confirmation") and path in parameter_labels
+    ]
+    completeness["pending_confirmation_items"] = pending_items
+    completeness["requires_confirmation"] = bool(completeness["missing_fields"] or pending_items)
+    if pending_items and not completeness["missing_fields"]:
+        completeness["message"] = "输入项完整，但卡片仍含默认值或待定参数，生产使用前必须确认。"
+
     return {
         "base_material": material,
         "thickness_mm": thickness,
         "process": process,
         "process_assumed": process_assumed,
+        "input_completeness": completeness,
+        "parameter_sources": parameter_sources,
         "groove": _groove_rule(thickness),
         "joint_gap_mm": _gap_rule(thickness),
         "welding_position": _POSITION_HINT,
-        "consumables": _find_rec(param_match, "推荐焊材") or "",
+        "consumables": str(consumables_rec.get("value", "")) or "",
         "electrode_diameter": f"Φ{electrode_mm}mm" if electrode_mm else "",
         "electrical": {
             "current_a": current,
