@@ -19,6 +19,8 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from app.retrieval_quality import assess_content_quality
+
 try:
     import numpy as np
 except ImportError:
@@ -191,7 +193,7 @@ def semantic_vec(text: str):
 class VectorIndex:
     """增量向量库：add/search/remove/save/load"""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, dim: int = 4096, index_dir: str = "saved_knowledge/vector_index"):
         self.dim = dim
@@ -265,18 +267,33 @@ class VectorIndex:
                     if len(self.ids) > 0:
                         scores[i] = 0.7 * scores[i] + 0.3 * sem_scores[rank]
 
-        top = int(min(top_k, len(self.ids)))
+        top = int(min(max(top_k * 3, top_k), len(self.ids)))
         if top <= 0:
             return []
         idx = np.argsort(-scores)[:top]
-        return [
-            {
-                "doc_id": self.ids[i],
-                "score": round(float(scores[i]), 4),
-                "meta": self.meta.get(self.ids[i], {}),
-            }
-            for i in idx
-        ]
+        results = []
+        seen = set()
+        for i in idx:
+            doc_id = self.ids[i]
+            meta = self.meta.get(doc_id, {})
+            dedupe_key = (
+                str(meta.get("source", "")).strip().lower(),
+                str(meta.get("chapter", "")).strip().lower(),
+            )
+            if dedupe_key != ("", "") and dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            quality_score = float(meta.get("quality_score", 1.0))
+            raw_score = float(scores[i])
+            results.append({
+                "doc_id": doc_id,
+                "score": round(raw_score * (0.55 + 0.45 * quality_score), 4),
+                "raw_score": round(raw_score, 4),
+                "quality_score": round(quality_score, 3),
+                "meta": meta,
+            })
+        results.sort(key=lambda item: item["score"], reverse=True)
+        return results[:top_k]
 
     # ---------- 持久化 ----------
     def save(self) -> None:
@@ -308,9 +325,13 @@ class VectorIndex:
         npy = self.index_dir / "index.npy"
         ids_p = self.index_dir / "ids.json"
         meta_p = self.index_dir / "meta.json"
-        if not (npy.exists() and ids_p.exists()):
+        manifest_p = self.index_dir / "manifest.json"
+        if not (npy.exists() and ids_p.exists() and manifest_p.exists()):
             return False
         try:
+            manifest = json.loads(manifest_p.read_text(encoding="utf-8"))
+            if manifest.get("version") != self.VERSION or manifest.get("dim") != self.dim:
+                return False
             matrix = np.load(npy)
             self.ids = json.loads(ids_p.read_text(encoding="utf-8"))
             self.meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.exists() else {}
@@ -390,6 +411,9 @@ def index_book_chapters(store, source_id: str, vi: Optional[VectorIndex] = None)
     vi.remove_by_source(src["filename"])
     chapters = store.get_chapters(source_id)
     for i, ch in enumerate(chapters):
+        quality = assess_content_quality(ch.get("title", ""), ch.get("content", ""), ch.get("summary", ""))
+        if quality["filtered"]:
+            continue
         text = f"《{src['filename']}》 {ch.get('title','')}\n{ch.get('summary','')}\n{ch.get('content','')[:1500]}"
         vi.add_document(
             f"book/{source_id}/{i}",
@@ -400,6 +424,8 @@ def index_book_chapters(store, source_id: str, vi: Optional[VectorIndex] = None)
                 "chapter": ch.get("title", ""),
                 "page_hint": ch.get("page_hint", ""),
                 "kind": "book",
+                "quality_score": quality["score"],
+                "quality_issues": quality["issues"],
             },
         )
     return vi

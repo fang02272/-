@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import sys
-from typing import Optional
+from typing import Iterator, Optional
 
 import yaml
 
@@ -89,13 +89,20 @@ class LLMClient:
         if config is None:
             config = load_config()
         llm_cfg = config.get("llm", {})
-        self.api_base = llm_cfg.get("api_base", "").rstrip("/")
-        self.api_key = llm_cfg.get("api_key", "")
-        self.model = llm_cfg.get("model", "deepseek-chat")
-        self.max_tokens = llm_cfg.get("max_tokens", 4096)
+        self.api_base = os.getenv("WELDING_LLM_API_BASE", llm_cfg.get("api_base", "")).rstrip("/")
+        self.api_key = os.getenv("WELDING_LLM_API_KEY", llm_cfg.get("api_key", ""))
+        self.model = os.getenv("WELDING_LLM_MODEL", llm_cfg.get("model", "deepseek-chat"))
+        self.max_tokens = llm_cfg.get("max_tokens", 2000)
         self.temperature = llm_cfg.get("temperature", 0.3)
         self.timeout = llm_cfg.get("timeout_seconds", 120)
-        self.available = bool(self.api_key and self.api_key not in ("sk-your-api-key-here", ""))
+        placeholder = self.api_key.lower()
+        self.available = bool(
+            self.api_base
+            and self.api_key
+            and "replace_me" not in placeholder
+            and "your-api-key" not in placeholder
+            and "revoked" not in placeholder
+        )
 
     def chat(self, messages: list, stream: bool = False, max_tokens: int = None) -> Optional[str]:
         """
@@ -105,6 +112,9 @@ class LLMClient:
         """
         if not self.available:
             return None
+        if stream:
+            text = "".join(self.chat_stream(messages, max_tokens=max_tokens))
+            return _clean_output(text) if text else None
 
         url = f"{self.api_base}/chat/completions"
         headers = {
@@ -135,10 +145,10 @@ class LLMClient:
             logger.error(f"LLM call failed: {e}")
         return None
 
-    def chat_intent(self, user_message: str, intent: str = "other",
-                    rag_context: str = "", thin_catalog: str = "",
-                    concept: dict = None, local_payload: dict = None,
-                    max_tokens: int = 2000) -> Optional[str]:
+    def _build_intent_messages(self, user_message: str, intent: str = "other",
+                               rag_context: str = "", thin_catalog: str = "",
+                               concept: dict = None,
+                               local_payload: dict = None) -> list:
         """
         意图感知的压缩版问答（v2.5）：
         - 按意图（concept/parameter/mixed/other）定制 system prompt
@@ -198,7 +208,69 @@ class LLMClient:
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_message},
         ]
+        return messages
+
+    def chat_intent(self, user_message: str, intent: str = "other",
+                    rag_context: str = "", thin_catalog: str = "",
+                    concept: dict = None, local_payload: dict = None,
+                    max_tokens: int = 2000) -> Optional[str]:
+        """Run the intent-aware prompt through the non-streaming API."""
+        messages = self._build_intent_messages(
+            user_message, intent, rag_context, thin_catalog, concept, local_payload)
         return self.chat(messages, max_tokens=max_tokens)
+
+    def chat_stream(self, messages: list, max_tokens: int = None) -> Iterator[str]:
+        """Yield text deltas from an OpenAI-compatible SSE response."""
+        if not self.available:
+            return
+
+        import urllib.request
+
+        url = f"{self.api_base}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens or self.max_tokens,
+            "temperature": self.temperature,
+            "stream": True,
+        }
+        try:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        if data == "[DONE]":
+                            break
+                        continue
+                    try:
+                        event = json.loads(data)
+                        delta = event.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content")
+                        if content:
+                            yield content
+                    except (ValueError, KeyError, IndexError, TypeError):
+                        continue
+        except Exception as exc:
+            logger.error("LLM streaming call failed: %s", exc)
+
+    def chat_intent_stream(self, user_message: str, intent: str = "other",
+                           rag_context: str = "", thin_catalog: str = "",
+                           concept: dict = None, local_payload: dict = None,
+                           max_tokens: int = 2000) -> Iterator[str]:
+        """Yield text deltas using the same prompt as :meth:`chat_intent`."""
+        messages = self._build_intent_messages(
+            user_message, intent, rag_context, thin_catalog, concept, local_payload)
+        yield from self.chat_stream(messages, max_tokens=max_tokens)
 
     def chat_sync(self, user_message: str, context: str = "", uploaded_files: list = None,
                   knowledge_catalog: str = "", cross_source_matches: list = None) -> Optional[str]:

@@ -36,6 +36,7 @@ def main():
     from app.knowledge_store import get_store
     from app.expert_knowledge_base import ExpertKnowledgeBase
     from app.vector_store import VectorIndex, index_book_chapters
+    from app.answer_cache import sources_fingerprint
 
     store = get_store()
     sources = store.list_sources()
@@ -46,6 +47,8 @@ def main():
     # ---- 1. 专家知识库 ----
     kb = ExpertKnowledgeBase()
     kb_stats = kb.build(store)
+    kb.built_from["sources_fingerprint"] = sources_fingerprint(store)
+    kb.save()
     print(f"\n🧠 专家知识库：{kb_stats['concepts']} 概念 / {kb_stats['alias_index']} 别名 → expert_kb.json")
 
     # ---- 2. 向量数据库（全量重建） ----
