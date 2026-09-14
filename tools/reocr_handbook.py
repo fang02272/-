@@ -22,10 +22,13 @@ os.chdir(str(Path(__file__).resolve().parent.parent))
 import fitz
 from app.pdf_parser import PDFParser
 
-HANDBOOK = r"uploads/实用焊接工艺手册_第二版.pdf"
+# 支持任意 PDF：默认手册，可用参数指定（如 焊接结构原理.pdf）
+DEFAULT_PDF = r"uploads/实用焊接工艺手册_第二版.pdf"
 
 
 def main():
+    global HANDBOOK
+    HANDBOOK = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PDF
     # 修复 Windows GBK 控制台 emoji 打印问题
     if hasattr(sys.stdout, "reconfigure"):
         try:

@@ -265,31 +265,50 @@ def _normalize_joint(joint: str) -> str:
             return "立内角"
         if "外角" in j:
             return "立外角"
+    # 无平/立前缀的兜底：默认平焊位置（搭接/内角/外角/拼/对接）
+    if "搭" in j:
+        return "平搭接"
+    if "内角" in j:
+        return "平内角"
+    if "外角" in j:
+        return "平外角"
+    if "拼" in j or "对" in j or "接" in j:
+        return "平拼接"
     return j
 
 
-def find_weld_case(material: str, thickness, joint: str = "") -> Optional[dict]:
-    """查卡诺普真值：材料+板厚（+焊缝形式）→ 最匹配的工艺参数
-    返回 {current, voltage, speed, stick_out, gun_angle_fb, gun_angle_lr, ...} 或 None"""
+def find_weld_case(material: str, thickness, joint: str = "", variant: str = "基准") -> Optional[dict]:
+    """查卡诺普真值：材料+板厚（+焊缝形式+variant）→ 最匹配的工艺参数。
+    variant: 基准/电流小/电流大/电压小/电压大/速度快/速度慢/角度范围。
+    优先精确匹配 variant，无则回退基准。"""
     cases = _load_weld_cases()
     if not cases:
         return None
     mat = _normalize_material(material)
     jt = _normalize_joint(joint)
-    best = None
-    for c in cases:
-        if c.get("material") != mat:
-            continue
-        # 焊缝形式匹配（船型/平拼接等）
-        if jt and c.get("joint") != jt:
-            continue
-        # 板厚匹配（精确或最接近）
-        ct = c.get("thickness")
-        if ct is None or thickness is None:
-            continue
-        delta = abs(ct - thickness)
-        if best is None or delta < best[0]:
-            best = (delta, c)
+    v_target = variant or "基准"
+
+    def _search(variant_filter: str):
+        best = None
+        for c in cases:
+            if c.get("material") != mat:
+                continue
+            if variant_filter and c.get("variant") != variant_filter:
+                continue
+            if jt and c.get("joint") != jt:
+                continue
+            ct = c.get("thickness")
+            if ct is None or thickness is None:
+                continue
+            delta = abs(ct - thickness)
+            if best is None or delta < best[0]:
+                best = (delta, c)
+        return best
+
+    # 优先目标 variant，无则回退基准
+    best = _search(v_target)
+    if best is None and v_target != "基准":
+        best = _search("基准")
     if best and best[0] <= 2.0:  # 板厚偏差≤2mm 视为命中
         return best[1]
     return None
