@@ -15,7 +15,8 @@
 - 本地优先：高置信答案或已生成工艺卡片时不调用 LLM。
 - LLM 兜底：只注入命中的薄目录和少量相关原文，默认最多生成 2000 Token。
 - 答案缓存：LRU + TTL + 相似问题命中，知识源变化后自动失效。
-- SSE 流式回答：LLM 内容按增量展示；完成事件仍返回完整结构化结果。
+- SSE 流式回答：LLM 内容按增量展示；完成事件仍返回完整结构化结果；请求中断时可取消，失败时可直接重试。
+- 检索诊断：页面可查看 Top-5 章节的原始分、质量分、质量问题、命中关键词、可读预览和匹配解释；缺少工艺卡输入时可一键填入待补字段模板。
 - 可观测性：记录请求量、LLM 调用/失败、本地回答、缓存命中、P50/P95、分阶段耗时和 TTFT。
 - PDF 导入：支持文本 PDF；扫描 PDF 可使用单独配置的 PaddleOCR GPU 环境。
 
@@ -129,6 +130,9 @@ PyCharmMiscProject/
 │   ├── run_welding_qa.py        # 命令行问答
 │   ├── test_quality_and_card_features.py # 检索质量/卡片可靠性测试
 │   ├── test_runtime_features.py # 缓存/指标/SSE 回归测试
+│   ├── fixed_questions.json      # 固定50题及人工标注验收标准
+│   ├── evaluate_fixed_questions.py # 固定题集离线验收与性能报告
+│   ├── audit_knowledge_quality.py # saved_knowledge 数据质量审计
 │   └── tests.py                 # 完整本地测试集
 ├── requirements.txt
 ├── server.py                    # FastAPI 入口和统一查询流程
@@ -266,6 +270,12 @@ event: error   data: {"message":"错误信息"}
 
 # 语法编译检查
 .\.venv\Scripts\python.exe -m compileall -q app server.py
+
+# 固定50题离线验收：检索、引用初筛、缺失输入、缓存和耗时
+.\.venv\Scripts\python.exe tools\evaluate_fixed_questions.py --output reports\fixed_questions_evaluation.json
+
+# 抽样审计 saved_knowledge 的标题和页码质量
+.\.venv\Scripts\python.exe tools\audit_knowledge_quality.py --output reports\knowledge_quality_audit.json
 ```
 
 离线性能基准会禁用 LLM，并使用临时缓存，不会消耗 Token，也不会覆盖正式答案缓存：
@@ -279,6 +289,8 @@ event: error   data: {"message":"错误信息"}
 ```
 
 生成的 `benchmark_result*.json` 已加入 `.gitignore`。
+
+固定题集和知识质量审计的正式结果保存在 `reports/`，其中还包含三个演示场景和当前待人工处理的问题。固定题集的证据词命中是自动初筛，引用和 OCR 修复仍需人工对照原 PDF。
 
 ## 9. 开发时建议先看什么
 

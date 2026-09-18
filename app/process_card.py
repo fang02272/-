@@ -298,7 +298,7 @@ def build_process_card(extracted: dict, param_match: dict, query: str = "") -> O
     process = param_match.get("process")
     process_assumed = False
     # 工艺缺省：有材料/板厚但未指定工艺时，默认 GMAW/MIG（机器人焊接基线），并标注 assumed
-    if not process and (thickness is not None or material):
+    if not process and (thickness is not None or material or extracted.get("param_terms")):
         process = ROBOT_DEFAULT_PROCESS
         process_assumed = True
     electrode = extracted.get("electrode") or param_match.get("electrode")

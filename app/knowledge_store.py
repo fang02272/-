@@ -958,7 +958,17 @@ class KnowledgeStore:
                     kw_ch_freq[kw] = kw_ch_freq.get(kw, 0) + 1
 
         results = []
-        query_lower = query.lower()
+        # 跨书检索也使用与问答/向量层相同的繁简、缩写和同义词归一化，
+        # 例如“二保焊/船形焊/道间温度”可以命中规范术语。
+        query_search = str(query or "")
+        try:
+            from app.welding_qa_system import WeldingQASystem
+            normalized_query = WeldingQASystem._normalize_text(query_search)
+            if normalized_query and normalized_query != query_search:
+                query_search = f"{query_search} {normalized_query}"
+        except Exception:
+            pass
+        query_lower = query_search.lower()
 
         for src in self.registry["sources"]:
             source_name = src["filename"]
