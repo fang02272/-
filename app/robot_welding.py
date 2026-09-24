@@ -223,7 +223,7 @@ def _load_weld_cases():
 
 
 def _normalize_material(material: str) -> str:
-    """材料归一化：低碳钢/碳钢/镀锌板/不锈钢 映射"""
+    """材料归一化：碳钢/镀锌板/不锈钢/铸铁/铝合金 映射"""
     if not material:
         return ""
     m = material.strip()
@@ -231,6 +231,10 @@ def _normalize_material(material: str) -> str:
         return "镀锌板"
     if "不锈钢" in m or "奥氏体" in m or "双相" in m:
         return "不锈钢"
+    # [新增] 铸铁类：灰铸铁(HT)/球墨铸铁(QT)/可锻铸铁 等
+    # 必须放在碳钢之前：球墨铸铁牌号 QT400 含 "Q"，否则会被碳钢分支误匹配
+    if "铸铁" in m or "球墨" in m or "灰口" in m or "可锻" in m or "QT" in m or "HT" in m:
+        return "铸铁"
     if "碳钢" in m or "低碳钢" in m or "Q" in m or "低合金" in m or "高强" in m:
         return "碳钢"
     if "铝" in m:
