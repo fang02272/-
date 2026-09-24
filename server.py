@@ -11,7 +11,7 @@ import time
 import threading
 import subprocess
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Iterator
 
 # 将项目根目录加入 path
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -19,7 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 
@@ -33,12 +33,13 @@ from app.qa_router import get_router, QueryIntent
 from app.expert_knowledge_base import get_expert_kb
 from app.vector_store import get_index, index_book_chapters
 from app.process_card import build_process_card
+from app.metrics_service import get_metrics
 
 # ---- FastAPI ----
 app = FastAPI(
     title="焊接工艺专家系统",
     description="LLM驱动的焊接知识智能问答 + 专家知识库 + 本地向量库 + 意图路由",
-    version="2.5.0",
+    version="2.8.0",
 )
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
@@ -57,6 +58,7 @@ _expert_kb = None
 _vector = None
 _kb_fingerprint = ""
 _routing_cfg = {}
+_index_init_lock = threading.Lock()
 
 
 def _get_cache():
@@ -94,6 +96,14 @@ def _load_routing_cfg() -> dict:
         return cfg.get("routing", {}) or {}
     except Exception:
         return {}
+
+
+def _stamp_expert_kb(kb, store) -> str:
+    """Persist the knowledge fingerprint used to build generated artifacts."""
+    fingerprint = sources_fingerprint(store)
+    kb.built_from["sources_fingerprint"] = fingerprint
+    kb.save()
+    return fingerprint
 
 
 # ============================================================
@@ -168,17 +178,37 @@ def _run_gpu_ingest_job(job_id: str, filename: str):
         _set_job(job_id, "error", str(e), filename)
 
 
-def _ensure_index():
+def _ensure_index_unlocked():
     """加载 专家知识库 + 向量库 + 外部知识源，刷新缓存指纹。
     在启动/上传/删除后调用一次，替代每查询全量重放。"""
     global _kb_fingerprint, _routing_cfg
     store = get_store()
     _routing_cfg = _load_routing_cfg()
+    current_fp = sources_fingerprint(store)
 
     kb = _get_expert_kb()
-    if not kb.load():
-        print("   ⚠️ 专家知识库未构建，请运行: python build_expert_kb.py")
-    _get_vector().load()
+    kb_loaded = kb.load()
+    stale = not kb_loaded or kb.built_from.get("sources_fingerprint") != current_fp
+    if stale:
+        stats = kb.build(store)
+        _stamp_expert_kb(kb, store)
+        print(f"   🧠 已从 saved_knowledge 重建专家知识库：{stats.get('concepts', 0)} 概念")
+
+    vi = _get_vector()
+    if stale or not vi.load():
+        vi.clear_all()
+        for canonical, entry in kb.concepts.items():
+            vi.add_document(
+                f"expert/{canonical}",
+                f"概念：{entry['name']}（{'，'.join(entry.get('aliases', [])[:6])}）\n"
+                f"{entry.get('definition', '')}\n{entry.get('application', '')}",
+                meta={"source": "expert", "kind": "expert",
+                      "chapter": f"概念：{entry['name']}"},
+            )
+        for src in store.list_sources():
+            index_book_chapters(store, src["id"], vi)
+        vi.save()
+        print(f"   📚 已从 saved_knowledge 重建向量索引：{len(vi.ids)} 条")
 
     # 注入所有已学习 PDF 的关键词到匹配系统（一次）
     external_kw_list = []
@@ -193,7 +223,13 @@ def _ensure_index():
         })
     qa_system.load_external_knowledge(external_kw_list)
 
-    _kb_fingerprint = sources_fingerprint(store)
+    _kb_fingerprint = current_fp
+
+
+def _ensure_index():
+    """Serialize lazy index initialization across concurrent first requests."""
+    with _index_init_lock:
+        _ensure_index_unlocked()
 
 
 # ------------------------------------------------------------
@@ -292,10 +328,32 @@ def _assemble_card_sections(plan: dict, result: dict) -> dict:
     th = card.get("thermal", {})
     jp = card.get("joint_prep", {})
     pp = card.get("pass_plan", {})
+    completeness = card.get("input_completeness", {})
+    parameter_sources = card.get("parameter_sources", {})
 
-    assume_note = "（工艺未指定，默认焊条电弧焊基线）" if card.get("process_assumed") else ""
+    def source_label(path: str) -> str:
+        source = parameter_sources.get(path, {})
+        detail = source.get("detail", "")
+        return f"{source.get('label', '未标注')}" + (f"（{detail}）" if detail else "")
+
+    missing_labels = "、".join(item.get("label", "") for item in completeness.get("missing_fields", []))
+    pending_labels = "、".join(item.get("label", "") for item in completeness.get("pending_confirmation_items", []))
+    warning_md = ""
+    if completeness.get("requires_confirmation"):
+        warning_reason = (
+            f"缺少 {missing_labels}。" if missing_labels else
+            f"以下参数仍待确认：{pending_labels or '默认参数'}。"
+        )
+        warning_md = (
+            f"> ⚠️ **工艺卡待确认**：{warning_reason}"
+            f"{completeness.get('message', '')}\n\n"
+        )
+
+    assume_note = "（工艺未指定，暂用 GMAW/MIG 机器人焊接基线，需确认）" if card.get("process_assumed") else ""
     plan_md = (
-        f"**母材**：{card.get('base_material','')}　**板厚**：{card.get('thickness_mm','')}mm　"
+        warning_md
+        + f"**母材**：{card.get('base_material') or '待补充'}　"
+        f"**板厚**：{str(card.get('thickness_mm')) + 'mm' if card.get('thickness_mm') is not None else '待补充'}　"
         f"**工艺**：{card.get('process','')}{assume_note}\n\n"
         f"### 坡口与装配\n"
         f"- 坡口形式：{card.get('groove','')}\n"
@@ -304,13 +362,13 @@ def _assemble_card_sections(plan: dict, result: dict) -> dict:
         f"- 定位焊：{jp.get('tack_weld','')}\n"
         f"- 焊接位置：{card.get('welding_position','')}\n\n"
         f"### 焊接参数\n"
-        f"| 参数 | 建议值 |\n|---|---|\n"
-        f"| 焊接电流 | {ele.get('current_a','')} |\n"
-        f"| 电弧电压 | {ele.get('voltage_v','')} |\n"
-        f"| 焊接速度 | {ele.get('travel_speed_cm_min','')} |\n"
-        f"| 焊材 | {card.get('consumables','')} |\n"
-        f"| 焊条/焊丝直径 | {card.get('electrode_diameter','')} |\n"
-        f"| 保护气体 | {card.get('shielding_gas','')} |\n\n"
+        f"| 参数 | 建议值 | 来源 |\n|---|---|---|\n"
+        f"| 焊接电流 | {ele.get('current_a','') or '待确认'} | {source_label('electrical.current_a')} |\n"
+        f"| 电弧电压 | {ele.get('voltage_v','') or '待确认'} | {source_label('electrical.voltage_v')} |\n"
+        f"| 焊接速度 | {ele.get('travel_speed_cm_min','') or '待确认'} | {source_label('electrical.travel_speed_cm_min')} |\n"
+        f"| 焊材 | {card.get('consumables','') or '待确认'} | {source_label('consumables')} |\n"
+        f"| 焊条/焊丝直径 | {card.get('electrode_diameter','') or '待确认'} | {source_label('electrode_diameter')} |\n"
+        f"| 保护气体 | {card.get('shielding_gas','') or '待确认'} | {source_label('shielding_gas')} |\n\n"
         f"### 热管理\n"
         f"- 预热：{th.get('preheat','')}\n"
         f"- 层间温度：{th.get('interpass_temp','')}\n"
@@ -508,7 +566,9 @@ def ingest_book(source_id: str, filename: str):
     except Exception as e:
         print(f"   ⚠️ 向量索引失败: {e}")
     try:
-        _get_expert_kb().build(store)
+        kb = _get_expert_kb()
+        kb.build(store)
+        _stamp_expert_kb(kb, store)
     except Exception as e:
         print(f"   ⚠️ 专家库重建失败: {e}")
     _get_cache().invalidate()
@@ -573,7 +633,7 @@ async def health():
     llm = _get_llm()
     return {
         "status": "ok",
-        "service": "焊接工艺专家系统 v2.5",
+        "service": "焊接工艺专家系统 v2.8",
         "llm_available": llm.available,
         "llm_model": llm.model if llm.available else None,
     }
@@ -718,14 +778,11 @@ async def get_categories():
 
 
 
-def process_query(q: str) -> dict:
-    """核心问答流程（HTTP 端点 与 命令行 run_welding_qa 共用）。
-    返回 QueryResponse 同结构的 dict（含 process_card 工艺卡片）。
-    流程：缓存 → 意图路由 → 工艺卡片/本地优先 → LLM 兜底。"""
+def _prepare_query(q: str, t0: float) -> dict:
+    """Run the shared cache, local analysis, retrieval and routing stages."""
     if not q or not q.strip():
         raise ValueError("查询内容不能为空")
     q = q.strip()
-    t0 = time.perf_counter()
 
     # --- 首次/知识库变化后加载 ---
     store = get_store()
@@ -741,9 +798,13 @@ def process_query(q: str) -> dict:
         cached["model_used"] = "cache"
         cached["cache_hit"] = True
         cached["elapsed_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-        return cached
+        return {
+            "q": q, "t0": t0, "fp": fp, "terminal": cached,
+            "local_ms": 0.0, "rag_ms": 0.0,
+        }
 
     # --- Step 2: 本地分析（无 LLM / 无网络） ---
+    local_t0 = time.perf_counter()
     result = qa_system.generate_structured(q)
     keywords = result.get("keywords", [])
     categories = result.get("matched_categories", [])
@@ -760,8 +821,10 @@ def process_query(q: str) -> dict:
             categories = categories + [f"📄 {s}" for s in matched_sources]
     except Exception:
         pass
+    local_ms = (time.perf_counter() - local_t0) * 1000
 
     # --- Step 3: 向量检索 + 专家库概念命中（关键词优先，向量增强） ---
+    rag_t0 = time.perf_counter()
     vector_hits = _get_vector().search(q, top_k=8)
     concept = _get_expert_kb().lookup(keywords) if keywords else None
     # [v2.6] 三层融合：关键词没命中概念时，用向量 top 命中补（语义关联）
@@ -794,43 +857,208 @@ def process_query(q: str) -> dict:
     # --- Step 6: 组装本地负载（概念/工艺卡片/参数 sections） ---
     local_payload = _assemble_local_payload(plan, result, q, t0)
 
-    # --- Step 7: 本地匹配优先 — 高置信 或 工艺卡片就绪 → 直接返回，跳过 LLM ---
-    if intent != QueryIntent.OTHER and (conf >= local_high or plan.get("process_card")):
-        if _payload_is_valid(local_payload):
-            _get_cache().put(q, local_payload, fp)
-        return local_payload
+    return {
+        "q": q,
+        "t0": t0,
+        "fp": fp,
+        "terminal": None,
+        "result": result,
+        "plan": plan,
+        "intent": intent,
+        "confidence": conf,
+        "local_payload": local_payload,
+        "local_sufficient": (
+            intent != QueryIntent.OTHER
+            and (conf >= local_high or bool(plan.get("process_card")))
+            and _payload_is_valid(local_payload)
+        ),
+        "local_ms": local_ms,
+        "rag_ms": (time.perf_counter() - rag_t0) * 1000,
+    }
 
-    # --- Step 8: LLM 兜底（意图感知 + 瘦身上下文） ---
-    llm = _get_llm()
-    llm_text = None
-    if llm.available:
-        try:
-            rag_context = _build_thin_context(q, plan, top_k=5)
-            thin_catalog = _build_thin_catalog(plan)
-            llm_text = llm.chat_intent(
-                q,
-                intent=intent.value,
-                rag_context=rag_context,
-                thin_catalog=thin_catalog,
-                concept=concept,
-                local_payload={"param_md": plan.get("param_md", "")},
-                max_tokens=2000,
-            )
-        except Exception:
-            llm_text = None
 
-    if llm_text and len(llm_text.strip()) > 50:
+def _record_query(state: dict, payload: dict, *, llm_ms: float = 0.0,
+                  assembly_ms: float = 0.0, llm_attempted: bool = False,
+                  llm_succeeded: bool = False, error: bool = False,
+                  ttft_ms: float = None) -> dict:
+    """Finalize elapsed time and record exactly one metrics sample."""
+    total_ms = (time.perf_counter() - state["t0"]) * 1000
+    payload["elapsed_ms"] = round(total_ms, 1)
+    get_metrics().record_request(
+        model_used=payload.get("model_used", "unknown"),
+        total_ms=total_ms,
+        local_ms=state.get("local_ms", 0.0),
+        rag_ms=state.get("rag_ms", 0.0),
+        llm_ms=llm_ms,
+        assembly_ms=assembly_ms,
+        llm_attempted=llm_attempted,
+        llm_succeeded=llm_succeeded,
+        error=error,
+        ttft_ms=ttft_ms,
+    )
+    return payload
+
+
+def _complete_local(state: dict, *, ttft_ms: float = None) -> dict:
+    payload = state.get("terminal") or state["local_payload"]
+    if state.get("terminal") is None and _payload_is_valid(payload):
+        _get_cache().put(state["q"], payload, state["fp"])
+    return _record_query(state, payload, ttft_ms=ttft_ms)
+
+
+def _complete_generated(state: dict, llm_text: str, model: str,
+                        *, llm_ms: float, llm_attempted: bool,
+                        ttft_ms: float = None) -> dict:
+    """Parse a generated answer or fall back to the prepared local answer."""
+    assembly_t0 = time.perf_counter()
+    succeeded = bool(llm_text and len(llm_text.strip()) > 50)
+    if succeeded:
         from app.llm_service import parse_llm_response
-        parsed = parse_llm_response(llm_text, q, keywords, categories)
-        payload = _llm_payload(parsed, result, q, llm.model, t0, intent, conf, plan)
+        parsed = parse_llm_response(
+            llm_text, state["q"], state["result"].get("keywords", []),
+            state["result"].get("matched_categories", []))
+        payload = _llm_payload(
+            parsed, state["result"], state["q"], model, state["t0"],
+            state["intent"], state["confidence"], state["plan"])
     else:
-        payload = local_payload
+        payload = state["local_payload"]
         payload["model_used"] = "local_knowledge_base"
 
-    # 空答案不缓存（避免缓存"0字空回复"导致永远命中空答案）
     if _payload_is_valid(payload):
-        _get_cache().put(q, payload, fp)
-    return payload
+        _get_cache().put(state["q"], payload, state["fp"])
+    assembly_ms = (time.perf_counter() - assembly_t0) * 1000
+    return _record_query(
+        state, payload, llm_ms=llm_ms, assembly_ms=assembly_ms,
+        llm_attempted=llm_attempted, llm_succeeded=succeeded,
+        ttft_ms=ttft_ms)
+
+
+def _build_llm_inputs(state: dict) -> tuple:
+    rag_t0 = time.perf_counter()
+    rag_context = _build_thin_context(state["q"], state["plan"], top_k=5)
+    thin_catalog = _build_thin_catalog(state["plan"])
+    state["rag_ms"] += (time.perf_counter() - rag_t0) * 1000
+    return rag_context, thin_catalog
+
+
+def process_query(q: str) -> dict:
+    """核心问答流程，供 HTTP 与命令行共用。
+
+    流程：缓存 → 本地分析/检索/路由 → 高置信本地答案 → LLM 兜底。
+    """
+    t0 = time.perf_counter()
+    try:
+        state = _prepare_query(q, t0)
+
+        if state.get("terminal") is not None:
+            return _complete_local(state)
+
+    # --- Step 7: 本地匹配优先 — 高置信 或 工艺卡片就绪 → 直接返回，跳过 LLM ---
+        if state["local_sufficient"]:
+            return _complete_local(state)
+
+    # --- Step 8: LLM 兜底（意图感知 + 瘦身上下文） ---
+        llm = _get_llm()
+        llm_text = None
+        llm_ms = 0.0
+        llm_attempted = bool(llm.available)
+        if llm.available:
+            rag_context, thin_catalog = _build_llm_inputs(state)
+            llm_t0 = time.perf_counter()
+            llm_text = llm.chat_intent(
+                state["q"],
+                intent=state["intent"].value,
+                rag_context=rag_context,
+                thin_catalog=thin_catalog,
+                concept=state["plan"].get("concept"),
+                local_payload={"param_md": state["plan"].get("param_md", "")},
+                max_tokens=2000,
+            )
+            llm_ms = (time.perf_counter() - llm_t0) * 1000
+
+        return _complete_generated(
+            state, llm_text, llm.model, llm_ms=llm_ms,
+            llm_attempted=llm_attempted)
+    except Exception:
+        get_metrics().record_request(
+            model_used="error", total_ms=(time.perf_counter() - t0) * 1000,
+            error=True)
+        raise
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _payload_preview(payload: dict) -> str:
+    """Build readable interim text for local/cache SSE responses."""
+    if payload.get("content"):
+        return str(payload["content"])
+    if payload.get("process_card"):
+        return "工艺卡片已生成，正在整理结构化参数……"
+    parts = []
+    for section in (payload.get("sections") or {}).values():
+        if isinstance(section, dict) and section.get("content"):
+            parts.append(str(section["content"]))
+    return "\n\n".join(parts) or "本地知识库已完成匹配。"
+
+
+def stream_query_events(q: str) -> Iterator[str]:
+    """SSE query pipeline; local/cache paths finish immediately, LLM yields deltas."""
+    t0 = time.perf_counter()
+    llm_attempted = False
+    recorded = False
+    try:
+        state = _prepare_query(q, t0)
+        yield _sse("start", {"query": state["q"]})
+
+        if state.get("terminal") is not None or state["local_sufficient"]:
+            ttft_ms = (time.perf_counter() - t0) * 1000
+            payload = _complete_local(state, ttft_ms=ttft_ms)
+            recorded = True
+            yield _sse("token", {"text": _payload_preview(payload)})
+            yield _sse("done", {"response": payload})
+            return
+
+        llm = _get_llm()
+        llm_attempted = bool(llm.available)
+        chunks = []
+        ttft_ms = None
+        llm_ms = 0.0
+        if llm.available:
+            rag_context, thin_catalog = _build_llm_inputs(state)
+            llm_t0 = time.perf_counter()
+            for chunk in llm.chat_intent_stream(
+                    state["q"], intent=state["intent"].value,
+                    rag_context=rag_context, thin_catalog=thin_catalog,
+                    concept=state["plan"].get("concept"),
+                    local_payload={"param_md": state["plan"].get("param_md", "")},
+                    max_tokens=2000):
+                if ttft_ms is None:
+                    ttft_ms = (time.perf_counter() - t0) * 1000
+                chunks.append(chunk)
+                yield _sse("token", {"text": chunk})
+            llm_ms = (time.perf_counter() - llm_t0) * 1000
+
+        if ttft_ms is None:
+            ttft_ms = (time.perf_counter() - t0) * 1000
+        text = "".join(chunks)
+        if text:
+            from app.llm_service import _clean_output
+            text = _clean_output(text)
+        payload = _complete_generated(
+            state, text, llm.model, llm_ms=llm_ms,
+            llm_attempted=llm_attempted, ttft_ms=ttft_ms)
+        recorded = True
+        if not chunks:
+            yield _sse("token", {"text": _payload_preview(payload)})
+        yield _sse("done", {"response": payload})
+    except Exception as exc:
+        if not recorded:
+            get_metrics().record_request(
+                model_used="error", total_ms=(time.perf_counter() - t0) * 1000,
+                error=True, llm_attempted=llm_attempted)
+        yield _sse("error", {"message": str(exc)})
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -842,6 +1070,45 @@ async def query(req: QueryRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/query/stream")
+async def query_stream(req: QueryRequest):
+    """SSE 问答接口；完成事件仍携带与 /api/query 相同的结构化结果。"""
+    return StreamingResponse(
+        stream_query_events(req.query),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/metrics")
+async def metrics():
+    data = get_metrics().snapshot()
+    data["cache"] = _get_cache().stats()
+    return data
+
+
+@app.post("/api/metrics/reset")
+async def reset_metrics():
+    get_metrics().reset()
+    _get_cache().reset_stats()
+    return {"status": "ok"}
+
+
+@app.get("/api/cache/stats")
+async def cache_stats():
+    return _get_cache().stats()
+
+
+@app.post("/api/cache/invalidate")
+async def invalidate_cache():
+    removed = _get_cache().invalidate()
+    return {"status": "ok", "removed": removed}
 
 
 # ============================================================
@@ -1041,7 +1308,9 @@ async def delete_upload(filename: str):
     except Exception:
         pass
     try:
-        _get_expert_kb().build(store)
+        kb = _get_expert_kb()
+        kb.build(store)
+        _stamp_expert_kb(kb, store)
     except Exception:
         pass
     _get_cache().invalidate()
@@ -1054,8 +1323,11 @@ async def delete_upload(filename: str):
 async def clear_all_uploads():
     """清除所有上传文件"""
     parser = _get_parser()
+    store = get_store()
     for f in parser.list_uploads():
         parser.delete_upload(f["name"])
+        source_id = f["name"].replace('.pdf', '').replace(' ', '_')[:40]
+        store.unregister(source_id)
     _get_vector().clear_all()
     _get_vector().save()
     _get_cache().invalidate()
@@ -1075,7 +1347,7 @@ async def root():
     index_path = STATIC_DIR / "index.html"
     if index_path.exists():
         return FileResponse(str(index_path))
-    return JSONResponse({"message": "焊接工艺专家系统 API v2.5", "docs": "/docs"}, status_code=200)
+    return JSONResponse({"message": "焊接工艺专家系统 API v2.8", "docs": "/docs"}, status_code=200)
 
 
 if STATIC_DIR.exists():

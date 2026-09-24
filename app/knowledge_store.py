@@ -26,6 +26,7 @@ from app.welding_knowledge_base import (
     KEYWORD_CATEGORY_MAP,
     PRACTICAL_HANDBOOK_KEYWORDS,
 )
+from app.retrieval_quality import assess_content_quality, best_content_preview, deduplicate_results
 
 
 class KnowledgeStore:
@@ -966,42 +967,48 @@ class KnowledgeStore:
                 content = ch.get("content", "")
                 title = ch.get("title", "")
                 ch_keywords = ch.get("keywords", [])
+                quality = assess_content_quality(title, content, ch.get("summary", ""))
+                if quality["filtered"]:
+                    continue
 
                 # 评分：IDF 加权关键词 + 标题命中 + 内容命中
-                score = 0.0
+                raw_score = 0.0
                 matched_kws = []
                 for kw in ch_keywords:
                     if kw.lower() in query_lower:
                         freq = kw_ch_freq.get(kw, 1)
                         # [调优] IDF 加权：1章独有词=3.0分, 10章共享词≈1.0分, 20章≈0.7分
                         weight = 3.0 / math.log2(1 + freq)
-                        score += weight
+                        raw_score += weight
                         matched_kws.append(kw)
                 # 标题命中加分
                 title_words = set(title.replace('第', '').replace('章', '').replace('节', '').split())
                 for tw in title_words:
                     if len(tw) >= 2 and tw in query:
-                        score += 5
+                        raw_score += 5
                 # 术语命中（查询词出现在章节内容中）
                 query_terms = re.findall(r'[\w一-鿿]{2,6}', query)
                 for qt in query_terms:
                     if qt in content[:8000]:  # [调优] 2000→8000，覆盖更深的章节内容
-                        score += 1
+                        raw_score += 1
 
-                if score > 0:
+                if raw_score > 0:
+                    # 质量差的 OCR 章节降权，但不因少量公式/英文误删技术内容。
+                    score = raw_score * (0.55 + 0.45 * quality["score"])
                     results.append({
                         "source": source_name,
                         "chapter": title,
                         "score": round(score, 1),
+                        "raw_score": round(raw_score, 1),
+                        "quality_score": quality["score"],
+                        "quality_issues": quality["issues"],
                         "matched_keywords": matched_kws[:10],
                         "chapter_keywords": ch_keywords[:15],
                         "summary": ch.get("summary", ""),
-                        "content_preview": content[:200],
+                        "content_preview": best_content_preview(content, query),
                     })
 
-        # 按评分排序
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:15]
+        return deduplicate_results(results, limit=15)
 
 
 # 全局实例

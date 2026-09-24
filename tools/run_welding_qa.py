@@ -46,24 +46,39 @@ def print_card(c: dict):
     th = c.get("thermal", {})
     jp = c.get("joint_prep", {})
     pp = c.get("pass_plan", {})
+    completeness = c.get("input_completeness", {})
+    parameter_sources = c.get("parameter_sources", {})
 
     line = "═" * 58
     print(f"\n{line}")
     print("🏷️  工 艺 卡 片")
     print(line)
-    print(f"🧱 母材: {c.get('base_material','')}　📏 板厚: {c.get('thickness_mm','')}mm　🔥 工艺: {c.get('process','')}")
+    material_text = c.get("base_material") or "待补充"
+    thickness_text = f"{c['thickness_mm']}mm" if c.get("thickness_mm") is not None else "待补充"
+    print(f"🧱 母材: {material_text}　📏 板厚: {thickness_text}　🔥 工艺: {c.get('process','')}")
     if c.get("process_assumed"):
-        print("⚠️  工艺未指定，默认焊条电弧焊基线")
+        print("⚠️  工艺未指定，暂用 GMAW/MIG 机器人焊接基线")
+    if completeness.get("requires_confirmation"):
+        missing = "、".join(x.get("label", "") for x in completeness.get("missing_fields", []))
+        pending = "、".join(x.get("label", "") for x in completeness.get("pending_confirmation_items", []))
+        reason = f"缺少: {missing}" if missing else f"待确认参数: {pending or '默认参数'}"
+        print(f"⚠️  输入完整度 {int(float(completeness.get('score', 0)) * 100)}%，{reason}")
+        for assumption in completeness.get("assumptions", []):
+            print(f"    • {assumption}")
+        print(f"    {completeness.get('message', '请补充信息后重新生成。')}")
     if eq:
         print(f"🤖 装备: 机器人 {eq.get('robot_model','')} / 焊枪 {eq.get('torch_model','')}"
               f" / 焊机 {eq.get('welder_model','')} / 作业幅宽 {eq.get('work_area_m2','')}㎡")
 
     print(f"\n⚙️ 焊接参数")
-    for k, v in [("焊接电流", el.get("current_a")), ("电弧电压", el.get("voltage_v")),
-                 ("焊接速度", el.get("travel_speed_cm_min")), ("焊材", c.get("consumables")),
-                 ("焊条/焊丝直径", c.get("electrode_diameter")), ("保护气体", c.get("shielding_gas"))]:
-        if v:
-            print(f"  {k}: {v}")
+    for k, v, path in [("焊接电流", el.get("current_a"), "electrical.current_a"),
+                       ("电弧电压", el.get("voltage_v"), "electrical.voltage_v"),
+                       ("焊接速度", el.get("travel_speed_cm_min"), "electrical.travel_speed_cm_min"),
+                       ("焊材", c.get("consumables"), "consumables"),
+                       ("焊条/焊丝直径", c.get("electrode_diameter"), "electrode_diameter"),
+                       ("保护气体", c.get("shielding_gas"), "shielding_gas")]:
+        source = parameter_sources.get(path, {}).get("label", "未标注")
+        print(f"  {k}: {v or '待确认'}  [{source}]")
 
     print(f"\n🤖 机器人参数")
     for k, v in [("焊接速度", rp.get("travel_speed")), ("焊枪倾角", rp.get("gun_angle")),
@@ -113,7 +128,7 @@ def print_card(c: dict):
         print(f"  • {ck.get('defect','')}: {ck.get('cause','')} → {ck.get('prevention','')}")
 
     print(f"\n💾 机器可读 JSON 字段: base_material / thickness_mm / process / groove / "
-          f"electrical / robot_params / quality / equipment")
+          f"electrical / robot_params / quality / equipment / input_completeness / parameter_sources")
     print(line)
 
 
