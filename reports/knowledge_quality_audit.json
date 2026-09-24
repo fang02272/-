@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "mode": "read_only_metadata_and_content_quality_audit",
+  "sample_size": 28,
+  "books": [
+    {
+      "book": "材料焊接原理_完整版.pdf",
+      "source_id": "材料焊接原理_完整版",
+      "chapter_count": 9,
+      "sampled_chapters": 9,
+      "ocr_title_issues": 0,
+      "missing_page_hints": 0
+    },
+    {
+      "book": "实用焊接工艺手册_第二版.pdf",
+      "source_id": "实用焊接工艺手册_第二版",
+      "chapter_count": 13,
+      "sampled_chapters": 13,
+      "ocr_title_issues": 0,
+      "missing_page_hints": 0
+    },
+    {
+      "book": "焊接结构原理.pdf",
+      "source_id": "焊接结构原理",
+      "chapter_count": 6,
+      "sampled_chapters": 6,
+      "ocr_title_issues": 0,
+      "missing_page_hints": 0
+    }
+  ],
+  "issues": [],
+  "summary": {
+    "issue_count": 0,
+    "ocr_title_count": 0,
+    "missing_page_hint_count": 0,
+    "note": "OCR标题和页码问题需依据原PDF人工核对，报告不会自动猜测或改写正文。"
+  }
+}

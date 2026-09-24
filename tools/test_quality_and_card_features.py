@@ -3,6 +3,7 @@
 import json
 import tempfile
 import time
+import asyncio
 from pathlib import Path
 
 
@@ -130,6 +131,15 @@ def run_tests() -> bool:
     frontend = (Path(__file__).resolve().parent.parent / "static" / "index.html").read_text(encoding="utf-8")
     _check(checks, "前端提供补充信息后重新生成提示", "补充信息后重新生成" in frontend)
     _check(checks, "前端焊接参数表展示来源列", "<th>来源</th>" in frontend and "sourceBadge" in frontend)
+    _check(checks, "前端缺参按钮可生成补充模板", "fillMissingPrompt" in frontend and "data-missing" in frontend)
+    _check(checks, "前端服务异常提供取消和重试", "retryQuery" in frontend and "cancelActiveQuery" in frontend and "AbortController" in frontend)
+
+    import server
+    inspect = asyncio.run(server.inspect_knowledge("Q345钢板预热温度"))
+    top = (inspect.get("match_test") or {}).get("top_chapters", [])
+    _check(checks, "检索诊断接口返回质量和摘要字段", bool(top) and all(
+        key in top[0] for key in ("raw_score", "quality_score", "quality_issues", "content_preview", "match_explanation")
+    ))
 
     print("\n" + "=" * 50)
     print("🧪 检索质量与工艺卡可靠性专项测试")

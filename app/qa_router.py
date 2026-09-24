@@ -170,13 +170,15 @@ class QARouter:
         has_thickness = extracted["thickness"] is not None
         has_process = extracted["process"] is not None
         has_unit = bool(_UNIT_RE.search(query))
+        has_card_term = any(k in query for k in ("工艺卡", "工艺卡片", "工艺参数", "预热温度", "焊接参数", "坡口设计"))
         # 参数信号：
         #  ① 显式参数词 + 材料/板厚/工艺/单位 任一
         #  ② 工艺 + (材料或板厚) 组合（如 "304不锈钢 3mm TIG焊"）
         #  ③ 材料 + 板厚 组合（如 "Q345 12mm"）
         param = (has_param_term and (has_material or has_thickness or has_process or has_unit)) \
                 or (has_process and (has_material or has_thickness)) \
-                or (has_material and has_thickness)
+                or (has_material and has_thickness) \
+                or has_card_term
         concept = any(marker in query for marker in _CONCEPT_MARKERS)
         return {
             "param": param,
@@ -186,6 +188,7 @@ class QARouter:
             "has_thickness": has_thickness,
             "has_process": has_process,
             "has_unit": has_unit,
+            "has_card_term": has_card_term,
         }
 
     # ------------------------------------------------------------
@@ -302,7 +305,14 @@ class QARouter:
                 uniq_sources.append(s)
         sources = uniq_sources[:8]
 
-        matched = bool(recs)
+        # 参数词本身也是有效的卡片入口；即使三项输入都缺失，也要生成
+        # 带 missing_fields 的待补充卡片，而不是静默回退到普通回答。
+        matched = (
+            bool(recs) or bool(extracted.get("param_terms"))
+            or bool(extracted.get("thickness")) or bool(extracted.get("materials"))
+            or bool(extracted.get("process"))
+            or any(k in query for k in ("工艺卡", "工艺卡片", "工艺参数", "预热温度", "焊接参数", "坡口设计"))
+        )
         return {
             "matched": matched,
             "material": material_key,

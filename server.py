@@ -694,7 +694,13 @@ async def inspect_knowledge(q: str = ""):
                     "book": m["source"],
                     "chapter": m["chapter"],
                     "score": m["score"],
+                    "raw_score": m.get("raw_score", m["score"]),
+                    "quality_score": m.get("quality_score", 1.0),
+                    "quality_issues": m.get("quality_issues", []),
                     "matched_keywords": m.get("matched_keywords", []),
+                    "summary": m.get("summary", ""),
+                    "content_preview": m.get("content_preview", ""),
+                    "match_explanation": _match_explanation(m),
                 }
                 for m in cross[:10]
             ],
@@ -875,6 +881,25 @@ def _prepare_query(q: str, t0: float) -> dict:
         "local_ms": local_ms,
         "rag_ms": (time.perf_counter() - rag_t0) * 1000,
     }
+
+
+def _match_explanation(match: dict) -> str:
+    """把检索分数组成一句面向开发/调试人员的解释。"""
+    reasons = []
+    keywords = match.get("matched_keywords", [])
+    if keywords:
+        reasons.append(f"命中关键词：{'、'.join(keywords[:6])}")
+    raw = match.get("raw_score")
+    score = match.get("score")
+    if raw is not None and score is not None and float(raw) > float(score):
+        reasons.append(f"质量调整：原始分 {raw} → 综合分 {score}")
+    quality = match.get("quality_score")
+    if quality is not None:
+        reasons.append(f"内容质量 {float(quality) * 100:.0f}%")
+    issues = match.get("quality_issues", [])
+    if issues:
+        reasons.append(f"降权原因：{'、'.join(issues)}")
+    return "；".join(reasons) or "根据章节内容相关性命中"
 
 
 def _record_query(state: dict, payload: dict, *, llm_ms: float = 0.0,

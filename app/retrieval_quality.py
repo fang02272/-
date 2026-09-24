@@ -31,6 +31,9 @@ def assess_content_quality(title: str, content: str, summary: str = "") -> Dict:
     cn_ratio = _ratio(cn_count, meaningful)
     marker_count = sum(sample.count(marker) for marker in _MOJIBAKE_MARKERS)
     marker_ratio = _ratio(marker_count, max(len(sample), 1))
+    title_meaningful = len(_USEFUL_RE.findall(title_text))
+    title_cn = len(_CN_RE.findall(title_text))
+    title_cn_ratio = _ratio(title_cn, title_meaningful)
 
     issues: List[str] = []
     score = 1.0
@@ -46,6 +49,13 @@ def assess_content_quality(title: str, content: str, summary: str = "") -> Dict:
 
     if not title_text or _PAGE_TITLE_RE.fullmatch(title_text):
         issues.append("标题信息不足")
+        score -= 0.12
+
+    # 章节正文可能仍有价值，但明显乱码的标题会污染目录、引用和排序解释。
+    title_garbled = any(marker in title_text for marker in _MOJIBAKE_MARKERS)
+    title_garbled = title_garbled or (title_meaningful >= 4 and title_cn_ratio < 0.25)
+    if title_garbled:
+        issues.append("标题疑似OCR乱码")
         score -= 0.12
 
     if marker_count:
@@ -85,6 +95,8 @@ def assess_content_quality(title: str, content: str, summary: str = "") -> Dict:
             "meaningful_chars": meaningful,
             "chinese_ratio": round(cn_ratio, 3),
             "useful_ratio": round(useful_ratio, 3),
+            "title_chinese_ratio": round(title_cn_ratio, 3),
+            "title_garbled": title_garbled,
         },
     }
 

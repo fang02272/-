@@ -267,6 +267,7 @@ input,textarea{font-family:inherit;font-size:inherit}
   </div>
   <div class="topbar-actions">
     <button class="topbar-btn" onclick="openBookPanel()" title="书籍目录">📖 书籍目录</button>
+    <button class="topbar-btn" onclick="openInspectModal()" title="检索结果诊断">🔎 检索诊断</button>
     <button class="topbar-btn primary" onclick="openUploadModal()" title="导入工艺PDF资料">📄 导入PDF</button>
     <button class="topbar-btn" onclick="clearChat()">✨ 新对话</button>
   </div>
@@ -283,6 +284,26 @@ input,textarea{font-family:inherit;font-size:inherit}
   </div>
   <div class="book-panel-body" id="book-panel-body"></div>
   <div class="book-panel-footer">王宗杰 主编 · 化学工业出版社 2024 · ISBN 978-7-122-44318-2</div>
+</div>
+
+<!-- ============================================================
+     Knowledge Retrieval Inspect Modal
+     ============================================================ -->
+<div class="modal-overlay" id="inspect-modal">
+  <div class="modal" onclick="event.stopPropagation()" style="width:680px;max-width:94vw">
+    <div class="modal-header">
+      <h3>🔎 知识库检索诊断</h3>
+      <button class="modal-close" onclick="closeInspectModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="inspect-query" type="text" maxlength="2000" placeholder="输入问题，查看章节为什么被检索出来" style="flex:1;border:1px solid var(--border);border-radius:8px;padding:9px 11px;outline:none">
+        <button class="topbar-btn primary" onclick="inspectKnowledge()">分析</button>
+      </div>
+      <p style="font-size:11px;color:var(--text-tertiary);margin-top:7px">展示关键词命中、原始分、质量分、降权原因和可读摘要，不调用大模型。</p>
+      <div id="inspect-status" style="margin-top:14px;color:var(--text-tertiary);font-size:13px">请输入问题后开始分析。</div>
+    </div>
+  </div>
 </div>
 
 <!-- ============================================================
@@ -346,6 +367,8 @@ input,textarea{font-family:inherit;font-size:inherit}
    Init
    ============================================================ */
 let busy=false;
+let activeAbortController=null;
+let activeQuery='';
 const $=s=>document.querySelector(s);
 const esc=s=>{const d=document.createElement('div');d.textContent=s;return d.innerHTML};
 
@@ -438,6 +461,56 @@ async function openBookPanel(){
   panel.classList.add('open');overlay.classList.add('open')
 }
 function closeBookPanel(){$('#book-panel').classList.remove('open');$('#book-overlay').classList.remove('open')}
+
+/* ============================================================
+   Knowledge Retrieval Inspect
+   ============================================================ */
+function openInspectModal(prefill=''){
+  const modal=$('#inspect-modal');
+  modal.classList.add('open');
+  const input=$('#inspect-query');
+  if(prefill)input.value=prefill;
+  setTimeout(()=>input.focus(),50);
+  if(input.value.trim())inspectKnowledge();
+}
+function closeInspectModal(){$('#inspect-modal').classList.remove('open')}
+document.getElementById('inspect-modal').addEventListener('click',function(e){if(e.target===this)closeInspectModal()});
+document.getElementById('inspect-query').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();inspectKnowledge()}});
+
+function qualityClass(score){
+  const n=Number(score);
+  return n>=.8?'var(--success)':(n>=.55?'var(--warning)':'var(--rose)');
+}
+function renderInspectResult(item){
+  const quality=Number(item.quality_score==null?1:item.quality_score);
+  const issue=(item.quality_issues||[]).map(x=>`<span style="display:inline-block;background:var(--warning-bg);color:var(--warning);padding:2px 6px;border-radius:10px;font-size:10px;margin:2px 4px 2px 0">${esc(x)}</span>`).join('');
+  const kws=(item.matched_keywords||[]).map(x=>`<span style="display:inline-block;background:var(--primary-light);color:var(--primary);padding:2px 7px;border-radius:10px;font-size:10px;margin:2px 4px 2px 0">${esc(x)}</span>`).join('');
+  return `<div style="border:1px solid var(--border);border-radius:9px;padding:11px 12px;margin-top:9px;background:var(--surface)">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start">
+      <div style="font-size:13px;font-weight:600;color:var(--text-primary)">📄 ${esc(item.book||'')} · ${esc(item.chapter||'')}</div>
+      <div style="white-space:nowrap;font-size:11px"><b>综合 ${Number(item.score||0).toFixed(1)}</b> · 原始 ${Number(item.raw_score==null?item.score:item.raw_score).toFixed(1)} · <span style="color:${qualityClass(quality)}">质量 ${(quality*100).toFixed(0)}%</span></div>
+    </div>
+    <div style="margin-top:6px">${kws||'<span style="font-size:11px;color:var(--text-tertiary)">未记录关键词命中</span>'}</div>
+    ${issue?`<div style="margin-top:4px">${issue}</div>`:''}
+    <div style="font-size:11px;color:var(--text-secondary);line-height:1.55;margin-top:6px">${esc(item.match_explanation||'')}</div>
+    ${item.content_preview?`<div style="margin-top:7px;padding:7px 9px;background:var(--surface-secondary);border-radius:6px;color:var(--text-secondary);font-size:11px;line-height:1.55">${esc(item.content_preview)}</div>`:''}
+  </div>`;
+}
+async function inspectKnowledge(){
+  const input=$('#inspect-query'),status=$('#inspect-status'),q=input.value.trim();
+  if(!q){status.innerHTML='<span style="color:var(--warning)">请输入问题后再分析。</span>';input.focus();return}
+  status.innerHTML='<span>⏳ 正在检查本地知识库检索结果…</span>';
+  try{
+    const r=await fetch('/api/knowledge/inspect?q='+encodeURIComponent(q));
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'检索诊断失败');
+    const mt=d.match_test||{};
+    let h=`<div style="padding:9px 11px;background:var(--surface-secondary);border-radius:8px;font-size:12px;line-height:1.7"><b>查询：</b>${esc(mt.query||q)}<br><b>识别关键词：</b>${esc((mt.matched_keywords||[]).join('、')||'无')}<br><b>命中章节：</b>${(mt.top_chapters||[]).length} 条</div>`;
+    if(!(mt.top_chapters||[]).length)h+='<div style="padding:16px 0;color:var(--text-tertiary);text-align:center">没有找到相关章节，可尝试更具体的材料、工艺或参数词。</div>';
+    else h+=(mt.top_chapters||[]).map(renderInspectResult).join('');
+    status.innerHTML=h;
+  }catch(e){status.innerHTML=`<div class="upload-status err">❌ ${esc(e.message||'检索诊断失败')}</div>`}
+}
 
 /* ============================================================
    PDF Upload Modal
@@ -563,6 +636,8 @@ async function send(text){
   const q=(text||$('#qinput').value).trim();
   if(!q)return;
   busy=true;$('#sendbtn').disabled=true;
+  activeQuery=q;
+  activeAbortController=new AbortController();
   const wel=$('#welcome');if(wel)wel.style.display='none';
   if(text){$('#qinput').value=''}else{$('#qinput').value=''}
   $('#qinput').style.height='auto';
@@ -572,10 +647,10 @@ async function send(text){
   scrollDown();
 
   try{
-    let d=await sendStream(q,ty);
+    let d=await sendStream(q,ty,activeAbortController.signal);
     // 兼容旧服务或不支持 ReadableStream 的浏览器
     if(d===null){
-      const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
+      const r=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q}),signal:activeAbortController.signal});
       if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'请求失败')}
       d=await r.json();
     }
@@ -583,16 +658,28 @@ async function send(text){
     appendExpertCard(d);
   }catch(e){
     ty.remove();
-    appendErr(e.message);
+    if(e.name==='AbortError'){
+      toast('查询已取消');
+    }else{
+      appendErr(e.message,q);
+    }
   }finally{
+    activeAbortController=null;
     busy=false;$('#sendbtn').disabled=false;
     $('#qinput').focus();scrollDown();
   }
 }
 
-async function sendStream(q,typingEl){
+function cancelActiveQuery(){
+  if(activeAbortController){
+    activeAbortController.abort();
+    activeAbortController=null;
+  }
+}
+
+async function sendStream(q,typingEl,signal){
   const r=await fetch('/api/query/stream',{
-    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q}),signal
   });
   if(!r.ok){
     if(r.status===404||r.status===405)return null;
@@ -661,14 +748,23 @@ function appendUser(t){
 function appendTyping(){
   const el=document.createElement('div');
   el.className='msg bot';
-  el.innerHTML=`<div class="msg-avatar">🔬</div><div class="msg-content"><div class="typing"><div class="typing-dots"><span></span><span></span><span></span></div><span class="typing-txt">AI焊接专家正在分析并生成深度内容...</span></div></div>`;
+  el.innerHTML=`<div class="msg-avatar">🔬</div><div class="msg-content"><div class="typing"><div class="typing-dots"><span></span><span></span><span></span></div><span class="typing-txt">AI焊接专家正在分析并生成深度内容...</span><button class="topbar-btn" style="padding:3px 8px;font-size:11px;margin-left:4px" onclick="cancelActiveQuery()">取消</button></div></div>`;
   $('#messages').appendChild(el);return el;
 }
 
-function appendErr(m){
+function retryQuery(btn){
+  const q=btn.dataset.query||activeQuery;
+  if(!q)return;
+  $('#qinput').value=q;
+  $('#qinput').dispatchEvent(new Event('input'));
+  send(q);
+}
+
+function appendErr(m,query=''){
   const el=document.createElement('div');
   el.className='msg bot';
-  el.innerHTML=`<div class="msg-avatar">⚠️</div><div class="msg-content"><div class="err-card">❌ 查询出错：${esc(m)}</div></div>`;
+  const retry=query?`<button class="topbar-btn" style="margin-top:8px;color:var(--rose);border-color:#fecaca" data-query="${esc(query)}" onclick="retryQuery(this)">↻ 重试</button>`:'';
+  el.innerHTML=`<div class="msg-avatar">⚠️</div><div class="msg-content"><div class="err-card">❌ 查询出错：${esc(m)}${retry}</div></div>`;
   $('#messages').appendChild(el);
 }
 
@@ -678,7 +774,7 @@ function appendErr(m){
 /* ============================================================
    工艺卡片渲染（机器人/仿真用，机器可读 JSON）
    ============================================================ */
-function renderProcessCard(c){
+function renderProcessCard(c,queryText=''){
   if(!c||!c.process)return '';
   const escH=esc;
   const rp=c.robot_params||{}, el=c.electrical||{}, th=c.thermal||{},
@@ -706,7 +802,7 @@ function renderProcessCard(c){
     h+=`<div><b>⚠️ 输入完整度 ${Math.round((complete.score||0)*100)}%</b>，${missing?'缺少：'+escH(missing):'待确认参数：'+escH(pending||'默认参数')}</div>`;
     (complete.assumptions||[]).forEach(a=>{h+=`<div>• ${escH(a)}</div>`});
     h+=`<div style="margin-top:4px"><b>${escH(complete.message||'请补充以上信息后重新生成，生产使用前必须确认。')}</b></div>`;
-    h+=`<button class="topbar-btn" style="margin-top:7px" onclick="document.getElementById('qinput').focus()">补充信息后重新生成</button>`;
+    h+=`<button class="topbar-btn" style="margin-top:7px" data-query="${escH(queryText||'')}" data-missing="${escH(missing)}" data-pending="${escH(pending)}" onclick="fillMissingPrompt(this)">📝 填入补充模板</button>`;
     h+='</div>';
   }else if(complete.status==='complete'){
     h+=`<div style="padding:8px 12px;margin-bottom:12px;border-radius:8px;background:var(--success-bg);color:var(--success);font-size:12px">✅ 输入完整度 100%，参数来源已标注，可进入工艺评审。</div>`;
@@ -808,6 +904,18 @@ function renderProcessCard(c){
   h+=`<pre id="proc-json-${(Math.random()*1e6|0)}" style="display:none;font-size:11px;max-height:260px;overflow:auto;background:#1E293B;color:#E2E8F0;padding:12px;border-radius:8px;margin-top:10px;white-space:pre-wrap">${escH(JSON.stringify(c,null,2))}</pre>`;
   return h;
 }
+function fillMissingPrompt(btn){
+  const base=(btn.dataset.query||'').trim();
+  const missing=(btn.dataset.missing||'').trim();
+  const pending=(btn.dataset.pending||'').trim();
+  let prompt=base;
+  if(missing)prompt+=(prompt?'；':'')+'请补充'+missing+'：'+missing.split('、').map(x=>x+'____').join('，');
+  if(pending)prompt+=(prompt?'；':'')+'请确认'+pending+'是否采用当前建议';
+  $('#qinput').value=prompt||'请补充工艺卡所需的母材、板厚和焊接工艺';
+  $('#qinput').dispatchEvent(new Event('input'));
+  $('#qinput').focus();
+  toast('已填入补充模板，请填写空白项后按 Enter 重新生成');
+}
 function copyProcessCard(btn){
   try{
     navigator.clipboard.writeText(btn.dataset.json).then(()=>toast('✅ 工艺卡片JSON已复制到剪贴板（仿真/机器人可导入）'));
@@ -834,7 +942,7 @@ function appendExpertCard(d){
 
   if(d.process_card){
     // 工艺卡片（机器可读，隐藏推理）
-    bodyHTML=renderProcessCard(d.process_card);
+    bodyHTML=renderProcessCard(d.process_card,d.query||'');
   }else if(d.content&&d.content.length>50){
     // LLM-generated markdown content
     let md=d.content;
@@ -978,7 +1086,7 @@ document.addEventListener('click',e=>{
   const chip=e.target.closest('.welcome-chip');
   if(chip&&chip.dataset.q){$('#qinput').value=chip.dataset.q;send(chip.dataset.q)}
 });
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeBookPanel();closeUploadModal()}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeBookPanel();closeUploadModal();closeInspectModal()}});
 $('#qinput').focus();
 
 /* ============================================================
