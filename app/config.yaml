@@ -34,12 +34,14 @@ routing:
   local_high: 0.78         # ≥ → 直接返回本地内容，跳过 LLM
   local_medium: 0.55       # [medium, high) → LLM + 紧凑 prompt 综合
 
-# 答案缓存（v2.5 新增）
+# 答案缓存（v2.6 起由 app/answer_cache.py 读取本段，不再硬编码）
 cache:
-  max_entries: 200         # LRU 容量
-  ttl_seconds: 3600        # 过期时间
-  sim_threshold: 0.80      # 相似命中：余弦阈值
-  jaccard_floor: 0.80      # 相似命中：中文/数字字符集合 Jaccard 阈值
+  max_entries: 500         # LRU 容量（原200，容量过小相似条目易互相挤占）
+  ttl_seconds: 86400       # 过期时间（原3600，仅1小时导致跨时段重复请求全 miss）
+  sim_threshold: 0.75      # 相似命中：余弦阈值（原0.80；Day5 调优定稿，题库上与原值同效、
+                           # 对余弦略低的同义改写保留余量；命中判定见 tools/cache_hit_test.py）
+  jaccard_floor: 0.75      # 相似命中：中文/数字字符集合 Jaccard 阈值（防误伤护栏，
+                           # 实测误伤对照最高 0.6，此值保留 0.15 裕度，不再下调）
 
 # 向量库（v2.5 新增）
 vector:

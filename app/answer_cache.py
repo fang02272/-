@@ -323,10 +323,13 @@ def normalize(query: str) -> str:
 # 指纹
 # ------------------------------------------------------------
 def sources_fingerprint(store) -> str:
-    """Fingerprint persisted knowledge metadata, not just source names.
+    """知识库指纹：已学书详细元数据（含各数据文件状态）+ 专家库文件状态。
 
-    Relearning a book under the same filename changes its counts/text length and
-    must invalidate both cached answers and generated indexes.
+    两个盲区都要覆盖：
+    - 同名重新学习一本书 → 章节数/字数/文件状态变化 → 指纹变化（失效缓存和索引）；
+    - build_expert_kb.py 重建专家库 → 书名集合不变但内容已更新，追加 expert_kb.json
+      的 mtime+size，否则缓存会继续返回旧专家库时代的答案
+      （2026-08-27 旧答案事故根因，修复于 Day5）。
     """
     sources = []
     for source in store.list_sources():
@@ -350,6 +353,12 @@ def sources_fingerprint(store) -> str:
         })
     sources.sort(key=lambda item: (item["id"], item["filename"]))
     raw = json.dumps(sources, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    try:
+        kb_p = Path(__file__).resolve().parent.parent / "saved_knowledge" / "expert_kb.json"
+        st = kb_p.stat()
+        raw += f"|expert_kb:{st.st_mtime_ns}:{st.st_size}".encode("utf-8")
+    except Exception:
+        pass  # 文件不存在时退化为纯知识库指纹（不影响正确性）
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
@@ -359,18 +368,24 @@ def sources_fingerprint(store) -> str:
 _cache: Optional[AnswerCache] = None
 
 
+def _build_cache() -> AnswerCache:
+    """从 config.yaml 的 cache: 段构造缓存（v2.6 起配置化，替代硬编码默认值）"""
+    kwargs = {}
+    try:
+        from app.llm_service import load_config
+        cfg = load_config() or {}
+        c = cfg.get("cache") or {}
+        if isinstance(c, dict):
+            for key in ("max_entries", "ttl_seconds", "sim_threshold", "jaccard_floor"):
+                if key in c and c[key] is not None:
+                    kwargs[key] = c[key]
+    except Exception:
+        pass
+    return AnswerCache(**kwargs)
+
+
 def get_cache() -> AnswerCache:
     global _cache
     if _cache is None:
-        try:
-            from app.llm_service import load_config
-            cfg = load_config().get("cache", {}) or {}
-        except Exception:
-            cfg = {}
-        _cache = AnswerCache(
-            max_entries=int(cfg.get("max_entries", 200)),
-            ttl_seconds=int(cfg.get("ttl_seconds", 3600)),
-            sim_threshold=float(cfg.get("sim_threshold", 0.80)),
-            jaccard_floor=float(cfg.get("jaccard_floor", 0.80)),
-        )
+        _cache = _build_cache()
     return _cache
