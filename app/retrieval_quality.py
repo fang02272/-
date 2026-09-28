@@ -107,24 +107,52 @@ def _query_terms(query: str) -> List[str]:
     ))
 
 
-def best_content_preview(content: str, query: str = "", limit: int = 260) -> str:
-    """优先返回包含查询词且可读的一段，而不是机械截取章节开头。"""
+def best_content_preview(content: str, query: str = "", limit: int = 260,
+                         extra_terms: Iterable[str] = ()) -> str:
+    """优先返回包含查询词且可读的一段，而不是机械截取章节开头。
+
+    extra_terms 传入查询的同义词扩展词：章节正文里往往写的是「层间温度」而用户
+    问的是「道间温度」，只用原查询定位会找不到命中句，退回章节开头，引用里也就
+    看不到证据词。
+
+    先在各查询词的命中位置附近截取小窗口再切分打分：预览上限只有 260 字符，
+    原来对整个章节（可达上百 KB）逐段切分并打分，开销与该章长度成正比，
+    是跨书检索的主要耗时来源；定位再打分后代价与章节长度基本无关。
+    """
     raw = str(content or "")
     if not raw.strip():
         return ""
-    terms = _query_terms(query)
-    candidates = []
-    for paragraph in re.split(r"(?:\r?\n){1,}|(?<=[。！？；])", raw):
-        text = _compact(paragraph)
-        meaningful = len(_USEFUL_RE.findall(text))
-        if meaningful < 15 or any(marker in text for marker in _MOJIBAKE_MARKERS):
-            continue
-        hits = sum(1 for term in terms if term in text.lower())
-        cn_count = len(_CN_RE.findall(text))
-        readability = _ratio(cn_count, max(meaningful, 1))
-        length_score = min(1.0, meaningful / 120)
-        candidates.append((hits * 4 + readability + length_score, text))
-    selected = max(candidates, key=lambda item: item[0])[1] if candidates else _compact(raw)
+    terms = list(dict.fromkeys(
+        [*_query_terms(query), *(str(t).lower() for t in extra_terms if t)]
+    ))
+
+    lowered_raw = raw.lower()
+    spans = []
+    for term in terms:
+        start = lowered_raw.find(term)
+        if start >= 0:
+            spans.append((max(0, start - 400), start + 600))
+    if not spans:
+        spans = [(0, 1200)]
+
+    best_score = None
+    best_text = ""
+    for start, end in spans:
+        for paragraph in re.split(r"(?:\r?\n){1,}|(?<=[。！？；])", raw[start:end]):
+            text = _compact(paragraph)
+            meaningful = len(_USEFUL_RE.findall(text))
+            if meaningful < 15 or any(marker in text for marker in _MOJIBAKE_MARKERS):
+                continue
+            lowered = text.lower()  # 每段只小写化一次（原来在每个查询词上各算一次）
+            hits = sum(1 for term in terms if term in lowered)
+            cn_count = len(_CN_RE.findall(text))
+            readability = _ratio(cn_count, max(meaningful, 1))
+            length_score = min(1.0, meaningful / 120)
+            score = hits * 4 + readability + length_score
+            if best_score is None or score > best_score:
+                best_score, best_text = score, text
+
+    selected = best_text or _compact(raw[:limit * 4])
     if len(selected) <= limit:
         return selected
     return selected[:limit].rstrip("，,；;。 ") + "…"

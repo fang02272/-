@@ -29,6 +29,41 @@ from app.welding_knowledge_base import (
 from app.retrieval_quality import assess_content_quality, best_content_preview, deduplicate_results
 
 
+def expand_query_terms(query: str) -> List[str]:
+    """返回查询所涉同义词组的全部表达（规范词 + 别名 + 英文缩写 + 口语说法）。
+
+    TERM_ALIAS_MAP 的每个条目是一组同义表达；只要查询里出现组内任意一个表达，
+    整组都会被返回。返回的这份词表供两条通道共用：
+
+    - 关键词通道：作为子串去匹配章节 keywords，使「道间温度」能命中以
+      「层间温度」为关键词的章节；
+    - 正文通道：直接到章节正文里找这些词。多数章节的关键词并未收录
+      「层间温度/短路过渡/厚板」这类概念，只能靠正文通道召回。
+
+    返回的是组内全部表达（含查询里已经出现的那个），调用方据此既能算出要追加的
+    扩展词，也能识别出「章节关键词只是某个更长查询术语的一截」的碎片匹配。
+
+    只做召回扩展、不做打分：精度由后续 IDF 加权打分与碎片降权保证。
+    """
+    text = str(query or "")
+    if not text:
+        return []
+    lowered = text.lower()
+    terms: List[str] = []
+    try:
+        from app.welding_knowledge_base import TERM_ALIAS_MAP
+        for canonical, aliases in TERM_ALIAS_MAP.items():
+            group = [str(canonical), *(str(a) for a in aliases)]
+            if not any(len(n) >= 2 and n.lower() in lowered for n in group):
+                continue
+            for name in group:
+                if len(name) >= 2 and name not in terms:
+                    terms.append(name)
+    except Exception:
+        pass
+    return terms
+
+
 class KnowledgeStore:
     """持久化知识库，管理原书 + 所有已学习的上传PDF"""
 
@@ -949,17 +984,35 @@ class KnowledgeStore:
         """
         import math
 
+        # 章节数据每次查询只解析一次（原来在关键词统计和主循环里各读一遍 chapters.json），
+        # 内容小写化也在此做一次，供 IDF 统计和打分共用，避免同一份内容扫两遍。
+        records = []
+        for src in self.registry["sources"]:
+            for ch in self.get_chapters(src["id"]):
+                content = ch.get("content", "")
+                title = ch.get("title", "")
+                quality = assess_content_quality(title, content, ch.get("summary", ""))
+                if quality["filtered"]:
+                    continue
+                records.append({
+                    "source": src["filename"],
+                    "chapter": title,
+                    "keywords": ch.get("keywords", []),
+                    "summary": ch.get("summary", ""),
+                    "content": content,
+                    "content_lower": content[:8000].lower(),
+                    "quality": quality,
+                })
+
         # [调优] 预计算每个关键词的 IDF 权重（跨章频率越低 → 权重越高）
         kw_ch_freq: Dict[str, int] = {}
-        for src in self.registry["sources"]:
-            chapters = self.get_chapters(src["id"])
-            for ch in chapters:
-                for kw in set(ch.get("keywords", [])):
-                    kw_ch_freq[kw] = kw_ch_freq.get(kw, 0) + 1
+        for rec in records:
+            for kw in set(rec["keywords"]):
+                kw_ch_freq[kw] = kw_ch_freq.get(kw, 0) + 1
 
-        results = []
-        # 跨书检索也使用与问答/向量层相同的繁简、缩写和同义词归一化，
-        # 例如“二保焊/船形焊/道间温度”可以命中规范术语。
+        # 查询归一化 = 繁简/上下标归一化 + 术语别名扩展。
+        # 此前只做了繁简归一化，导致「道间温度→层间温度」「船形焊→船型焊」
+        # 「二保焊→MAG焊」这类口语/别名/缩写表达无法命中以规范词为关键词的章节。
         query_search = str(query or "")
         try:
             from app.welding_qa_system import WeldingQASystem
@@ -968,55 +1021,90 @@ class KnowledgeStore:
                 query_search = f"{query_search} {normalized_query}"
         except Exception:
             pass
+        group_terms = expand_query_terms(query_search)
         query_lower = query_search.lower()
+        extras = [t for t in group_terms if t.lower() not in query_lower]
+        if extras:
+            query_search = f"{query_search} {' '.join(extras)}"
+            query_lower = query_search.lower()
 
-        for src in self.registry["sources"]:
-            source_name = src["filename"]
-            chapters = self.get_chapters(src["id"])
-            for ch in chapters:
-                content = ch.get("content", "")
-                title = ch.get("title", "")
-                ch_keywords = ch.get("keywords", [])
-                quality = assess_content_quality(title, content, ch.get("summary", ""))
-                if quality["filtered"]:
-                    continue
+        # 碎片匹配词表：查询中已被完整识别的术语（≥3 字）。章节关键词若只是它的
+        # 一截（查询含「道间温度」时的关键词「温度」），证据力很弱，需降权，
+        # 否则所有含该碎片关键词的章节底分相同、Top-5 被拉平。
+        fragment_terms = [t.lower() for t in group_terms if len(t) >= 3]
 
-                # 评分：IDF 加权关键词 + 标题命中 + 内容命中
-                raw_score = 0.0
-                matched_kws = []
-                for kw in ch_keywords:
-                    if kw.lower() in query_lower:
-                        freq = kw_ch_freq.get(kw, 1)
-                        # [调优] IDF 加权：1章独有词=3.0分, 10章共享词≈1.0分, 20章≈0.7分
-                        weight = 3.0 / math.log2(1 + freq)
-                        raw_score += weight
-                        matched_kws.append(kw)
-                # 标题命中加分
-                title_words = set(title.replace('第', '').replace('章', '').replace('节', '').split())
-                for tw in title_words:
-                    if len(tw) >= 2 and tw in query:
-                        raw_score += 5
-                # 术语命中（查询词出现在章节内容中）
-                query_terms = re.findall(r'[\w一-鿿]{2,6}', query)
-                for qt in query_terms:
-                    if qt in content[:8000]:  # [调优] 2000→8000，覆盖更深的章节内容
-                        raw_score += 1
+        # 内容通道词表 = 查询原文切块（覆盖型号/数值等） + 同义词组扩展。
+        # 扩展词是关键：多数章节的关键词没有收录「层间温度/短路过渡/厚板」，
+        # 只能靠正文命中把它们召回到前列。
+        query_terms = [t for t in re.findall(r'[\w一-鿿]{2,6}', str(query or "")) if len(t) >= 2]
+        _seen_terms = {t.lower() for t in query_terms}
+        for extra in extras:
+            if extra.lower() not in _seen_terms:
+                _seen_terms.add(extra.lower())
+                query_terms.append(extra)
 
-                if raw_score > 0:
-                    # 质量差的 OCR 章节降权，但不因少量公式/英文误删技术内容。
-                    score = raw_score * (0.55 + 0.45 * quality["score"])
-                    results.append({
-                        "source": source_name,
-                        "chapter": title,
-                        "score": round(score, 1),
-                        "raw_score": round(raw_score, 1),
-                        "quality_score": quality["score"],
-                        "quality_issues": quality["issues"],
-                        "matched_keywords": matched_kws[:10],
-                        "chapter_keywords": ch_keywords[:15],
-                        "summary": ch.get("summary", ""),
-                        "content_preview": best_content_preview(content, query),
-                    })
+        query_terms_lower = [(t, t.lower()) for t in query_terms]
+        term_df: Dict[str, int] = {}
+        for term, lowered in query_terms_lower:
+            term_df[term] = sum(1 for rec in records if lowered in rec["content_lower"])
+
+        results = []
+        for rec in records:
+            content = rec["content"]
+            title = rec["chapter"]
+            ch_keywords = rec["keywords"]
+            quality = rec["quality"]
+
+            # 先收集命中关键词，再做「长术语吞并短子串」：同时命中「层间温度」和
+            # 「温度」时只计长词。否则「温度/开裂/焊接」这类泛词只要作为子串出现在
+            # 查询里，就会给几乎每个章节加上相近的底分，排序被拉平、Top-5 退化成
+            # 按插入顺序取前几章（与 extract_keywords 的吞并过滤同一思路）。
+            hits = [kw for kw in ch_keywords if kw.lower() in query_lower]
+            hits.sort(key=len, reverse=True)
+            matched_kws = []
+            for kw in hits:
+                if not any(kw in longer for longer in matched_kws):
+                    matched_kws.append(kw)
+
+            # 评分：IDF 加权关键词 + 标题命中 + 内容命中
+            raw_score = 0.0
+            for kw in matched_kws:
+                freq = kw_ch_freq.get(kw, 1)
+                # [调优] IDF 加权：1章独有词=3.0分, 10章共享词≈1.0分, 20章≈0.7分
+                weight = 3.0 / math.log2(1 + freq)
+                kw_lower = kw.lower()
+                if any(kw_lower != t and kw_lower in t for t in fragment_terms):
+                    weight *= 0.25  # 碎片匹配：仅是更长查询术语的一截，证据力弱
+                raw_score += weight
+            # 标题命中加分
+            title_words = set(title.replace('第', '').replace('章', '').replace('节', '').split())
+            for tw in title_words:
+                if len(tw) >= 2 and tw in query:
+                    raw_score += 5
+            # 术语命中（查询词出现在章节内容中）—— 按跨章频率 IDF 加权，
+            # 泛词近乎不加分，稀有词才拉开区分度。
+            for term, lowered in query_terms_lower:
+                if lowered in rec["content_lower"]:  # [调优] 2000→8000，覆盖更深的章节内容
+                    df = term_df.get(term, 0)
+                    raw_score += 1.0 / math.log2(1 + df) if df > 0 else 1.0
+
+            if raw_score > 0:
+                # 质量差的 OCR 章节降权，但不因少量公式/英文误删技术内容。
+                score = raw_score * (0.55 + 0.45 * quality["score"])
+                results.append({
+                    "source": rec["source"],
+                    "chapter": title,
+                    # 保留 3 位小数：原来 round(,1) 会把近似同分的章节压成同一个数，
+                    # 稳定排序退化为插入顺序。
+                    "score": round(score, 3),
+                    "raw_score": round(raw_score, 3),
+                    "quality_score": quality["score"],
+                    "quality_issues": quality["issues"],
+                    "matched_keywords": matched_kws[:10],
+                    "chapter_keywords": ch_keywords[:15],
+                    "summary": rec["summary"],
+                    "content_preview": best_content_preview(content, query, extra_terms=group_terms),
+                })
 
         return deduplicate_results(results, limit=15)
 

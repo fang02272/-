@@ -323,13 +323,13 @@ def normalize(query: str) -> str:
 # 指纹
 # ------------------------------------------------------------
 def sources_fingerprint(store) -> str:
-    """知识库指纹：已学书详细元数据（含各数据文件状态）+ 专家库文件状态。
+    """知识库指纹（稳定）：已学书详细元数据（含各数据文件状态）。
 
-    两个盲区都要覆盖：
-    - 同名重新学习一本书 → 章节数/字数/文件状态变化 → 指纹变化（失效缓存和索引）；
-    - build_expert_kb.py 重建专家库 → 书名集合不变但内容已更新，追加 expert_kb.json
-      的 mtime+size，否则缓存会继续返回旧专家库时代的答案
-      （2026-08-27 旧答案事故根因，修复于 Day5）。
+    同名重新学习一本书 → 章节数/字数/文件状态变化 → 指纹变化，失效缓存和索引。
+
+    注意：刻意不包含 expert_kb.json 自身状态 —— 它每次重建/盖章都会被重写
+    （mtime 变化），纳入后会形成「指纹变 → 重建 → 写文件 → 指纹再变」的
+    无限重建循环。专家库内容的失效检测由 answer_cache_fingerprint() 承担。
     """
     sources = []
     for source in store.list_sources():
@@ -353,6 +353,19 @@ def sources_fingerprint(store) -> str:
         })
     sources.sort(key=lambda item: (item["id"], item["filename"]))
     raw = json.dumps(sources, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def answer_cache_fingerprint(store) -> str:
+    """答案缓存指纹：知识库指纹 + expert_kb.json 文件状态（mtime+size）。
+
+    build_expert_kb.py 重建专家库后书名集合不变、知识内容却已更新，若不纳入
+    专家库文件状态，缓存会继续返回旧专家库时代的答案
+    （2026-08-27 旧答案事故根因，修复于 Day5）。
+
+    仅用于答案缓存键：缓存本身不写 expert_kb.json，不会形成重建循环。
+    """
+    raw = sources_fingerprint(store).encode("utf-8")
     try:
         kb_p = Path(__file__).resolve().parent.parent / "saved_knowledge" / "expert_kb.json"
         st = kb_p.stat()

@@ -28,7 +28,7 @@ from app.welding_knowledge_base import KNOWLEDGE_CATEGORIES
 from app.knowledge_store import get_store
 
 # ---- v2.5 新组件 ----
-from app.answer_cache import get_cache, sources_fingerprint
+from app.answer_cache import get_cache, sources_fingerprint, answer_cache_fingerprint
 from app.qa_router import get_router, QueryIntent
 from app.expert_knowledge_base import get_expert_kb
 from app.vector_store import get_index, index_book_chapters
@@ -456,6 +456,14 @@ def _assemble_local_payload(plan: dict, result: dict, q: str, t0) -> dict:
     src_section = sections.get("sources")
     if isinstance(src_section, dict):
         references = src_section.get("primary", []) or references
+    # [修复] 工艺卡与参数类回答此前没有任何来源：这些分支不生成 sources 段，
+    # references 恒为空，导致「参数/预热依据必须可追溯」无法满足。这里用同一轮
+    # 跨源检索命中的章节补齐（复用 plan 上已算好的结果，不额外发起检索）。
+    if not references:
+        for match in (plan.get("cross_source_matches") or [])[:5]:
+            ref = f"《{match.get('source', '')}》「{match.get('chapter', '')}」"
+            if ref not in references:
+                references.append(ref)
 
     conf = plan.get("confidence", 0.0)
     payload = {
@@ -795,7 +803,8 @@ def _prepare_query(q: str, t0: float) -> dict:
     current_fp = sources_fingerprint(store)
     if current_fp != _kb_fingerprint or not _kb_fingerprint:
         _ensure_index()
-    fp = _kb_fingerprint
+    # 缓存键额外纳入 expert_kb.json 状态：专家库外部重建后旧答案必须失效（Day5 盲区修复）
+    fp = answer_cache_fingerprint(store)
 
     # --- Step 1: 结果缓存 ---
     cached = _get_cache().get(q, fp)
@@ -816,6 +825,7 @@ def _prepare_query(q: str, t0: float) -> dict:
     categories = result.get("matched_categories", [])
 
     # 跨源匹配补充关键词/类别
+    cross_source_matches = []
     try:
         cross_source_matches = store.search_across_sources(q)
         for src in store.list_sources():
@@ -849,6 +859,8 @@ def _prepare_query(q: str, t0: float) -> dict:
     intent = plan["intent"]
     plan["concept"] = concept
     plan["vector_hits"] = vector_hits
+    # 复用本轮跨源检索结果给引用兜底，避免在 _assemble_local_payload 里重复检索
+    plan["cross_source_matches"] = cross_source_matches
 
     # --- Step 5: 工艺匹配（内部思考②）+ 工艺卡片（机器可读，供仿真/机器人） ---
     if intent in (QueryIntent.PARAMETER, QueryIntent.MIXED):
